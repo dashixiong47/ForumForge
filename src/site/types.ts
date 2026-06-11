@@ -13,6 +13,7 @@ export interface SiteUser {
 	level?: number;
 	last_checkin_date?: string | null;
 	created_at?: string;
+	pending_email?: string | null;
 }
 
 export interface SitePost {

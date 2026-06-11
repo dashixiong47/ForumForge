@@ -606,7 +606,7 @@ export default {
 			try {
 				const payload = await authenticate(request);
 				const user = await db.prepare(
-					'SELECT id, email, username, role, verified, avatar_url, email_notifications, show_public_posts, points, experience, level, last_checkin_date, created_at FROM users WHERE id = ?'
+					'SELECT id, email, username, role, verified, avatar_url, email_notifications, show_public_posts, points, experience, level, last_checkin_date, created_at, pending_email FROM users WHERE id = ?'
 				).bind(payload.id).first<SiteUser>();
 				if (!user) return null;
 				(user as any).permissions = (await loadAccessUser(payload)).permissions;
