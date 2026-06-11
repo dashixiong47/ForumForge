@@ -7,7 +7,27 @@ import { readStringEnv } from '../core/env';
 import { hashPassword } from '../core/password';
 import { FORUMFORGE_ICON_DATA_URL, FORUMFORGE_ICON_FILENAME, FORUMFORGE_ICON_KEY, FORUMFORGE_ICON_SVG } from '../assets/brand';
 
-export async function ensureBootstrap(env: Env, db: D1Database): Promise<void> {		const ensureBootstrapAdmin = async () => {
+const BOOTSTRAP_VERSION = '2026-06-11.2';
+
+let bootstrapPromise: Promise<void> | null = null;
+let bootstrapReady = false;
+
+export async function ensureBootstrap(env: Env, db: D1Database): Promise<void> {
+	if (bootstrapReady) return;
+	if (!bootstrapPromise) {
+		bootstrapPromise = runBootstrap(env, db)
+			.then(() => {
+				bootstrapReady = true;
+			})
+			.catch((error) => {
+				bootstrapPromise = null;
+				throw error;
+			});
+	}
+	await bootstrapPromise;
+}
+
+async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const ensureBootstrapAdmin = async () => {
 			const row = await db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").first<DBCount>();
 			if ((row?.count || 0) > 0) return;
 
@@ -892,6 +912,15 @@ export async function ensureBootstrap(env: Env, db: D1Database): Promise<void> {
 			}
 
 			if (!baseSchemaMissing) {
+				try {
+					const marker = await db.prepare("SELECT value FROM settings WHERE key = 'bootstrap_version'").first<{ value: string }>();
+					if (marker?.value === BOOTSTRAP_VERSION) {
+						await ensureBootstrapAdmin();
+						return;
+					}
+				} catch {
+					// Old databases may not have settings yet; fall through to the normal bootstrap path.
+				}
 				for (const stmt of [...profileAlterStmts, ...tagSchemaStmts, ...pluginSchemaStmts, ...i18nSchemaStmts, ...mediaSchemaStmts, ...progressSchemaStmts, ...notificationSchemaStmts, ...visitSchemaStmts, ...rolePermissionSchemaStmts, ...oauthSchemaStmts]) {
 					try {
 						await db.prepare(stmt).run();
@@ -901,6 +930,7 @@ export async function ensureBootstrap(env: Env, db: D1Database): Promise<void> {
 				}
 				await ensureBootstrapAdmin();
 				await ensureDemoContent();
+				await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('bootstrap_version', ?)").bind(BOOTSTRAP_VERSION).run();
 				return;
 			}
 
@@ -1032,6 +1062,7 @@ export async function ensureBootstrap(env: Env, db: D1Database): Promise<void> {
 			}
 			await ensureBootstrapAdmin();
 			await ensureDemoContent();
+			await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('bootstrap_version', ?)").bind(BOOTSTRAP_VERSION).run();
 			// verify posts table exists now
 			try {
 				await db.prepare('SELECT 1 FROM posts LIMIT 1').first();
