@@ -19,13 +19,20 @@
 			"database_name": "forumforge-db",
 			"database_id": "fff20255-a2a1-4cac-be25-460ef30f9369",
 			"remote": true,
-			"migrations_dir": "migrations"
+			"migrations_dir": "migrations",
+			"experimental_read_replication_enabled": true
 		}
 	],
 	/**
 	 * R2 Object Storage (for image uploads)
 	 * https://developers.cloudflare.com/r2/api/workers/workers-api-reference/
 	 */
+	"kv_namespaces": [
+		{
+			"binding": "CACHE",
+			"id": "e184783b1b4947d8a813a8216c49a366"
+		}
+	],
 	"r2_buckets": [
 		{
 			"binding": "BUCKET",
@@ -52,7 +59,7 @@
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
 	 */
-	// "placement": {  "mode": "smart" }
+	"placement": { "mode": "smart" },
 	/**
 	 * Bindings
 	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including

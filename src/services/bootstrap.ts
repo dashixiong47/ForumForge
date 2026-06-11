@@ -7,6 +7,7 @@ import { readStringEnv } from '../core/env';
 import { hashPassword } from '../core/password';
 import { FORUMFORGE_ICON_DATA_URL, FORUMFORGE_ICON_FILENAME, FORUMFORGE_ICON_KEY, FORUMFORGE_ICON_SVG } from '../assets/brand';
 import { CATEGORY_ICONS } from '../assets/category-icons';
+import { KV_BOOTSTRAP_KEY, KV_BOOTSTRAP_TTL } from '../core/kv';
 
 const BOOTSTRAP_VERSION = '2026-06-11.2';
 
@@ -15,10 +16,29 @@ let bootstrapReady = false;
 
 export async function ensureBootstrap(env: Env, db: D1Database): Promise<void> {
 	if (bootstrapReady) return;
+
+	// KV fast path: skip D1 entirely when bootstrap version is already cached.
+	// Cold-start cost drops from ~20ms (D1 batch) to ~2ms (KV read).
+	const kv = env.CACHE;
+	if (kv) {
+		try {
+			const kvVersion = await kv.get(KV_BOOTSTRAP_KEY);
+			if (kvVersion === BOOTSTRAP_VERSION) {
+				bootstrapReady = true;
+				return;
+			}
+		} catch {
+			// KV unavailable — fall through to D1 check
+		}
+	}
+
 	if (!bootstrapPromise) {
 		bootstrapPromise = runBootstrap(env, db)
-			.then(() => {
+			.then(async () => {
 				bootstrapReady = true;
+				if (kv) {
+					await kv.put(KV_BOOTSTRAP_KEY, BOOTSTRAP_VERSION, { expirationTtl: KV_BOOTSTRAP_TTL }).catch(() => {});
+				}
 			})
 			.catch((error) => {
 				bootstrapPromise = null;
@@ -916,24 +936,32 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 				`INSERT OR IGNORE INTO settings (key, value) VALUES ('oauth_epic_client_id', '');`,
 				`INSERT OR IGNORE INTO settings (key, value) VALUES ('oauth_epic_client_secret', '');`
 			];
+			// Fast path: single batch roundtrip to check version + admin count
+			try {
+				const results = await db.batch([
+					db.prepare("SELECT value FROM settings WHERE key = 'bootstrap_version'"),
+					db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'"),
+				]);
+				const marker = results[0].results?.[0] as { value: string } | undefined;
+				const adminRow = results[1].results?.[0] as DBCount | undefined;
+				if (marker?.value === BOOTSTRAP_VERSION) {
+					if ((adminRow?.count || 0) === 0) await ensureBootstrapAdmin();
+					return;
+				}
+				// Version mismatch — schema exists, run migrations below
+			} catch {
+				// Schema missing — fall through to full bootstrap
+			}
+
 			let baseSchemaMissing = false;
 			try {
 				await db.prepare('SELECT 1 FROM posts LIMIT 1').first();
-			} catch (err: any) {
+			} catch {
 				baseSchemaMissing = true;
-				console.warn('Database schema missing, initializing', err);
+				console.warn('Database schema missing, initializing');
 			}
 
 			if (!baseSchemaMissing) {
-				try {
-					const marker = await db.prepare("SELECT value FROM settings WHERE key = 'bootstrap_version'").first<{ value: string }>();
-					if (marker?.value === BOOTSTRAP_VERSION) {
-						await ensureBootstrapAdmin();
-						return;
-					}
-				} catch {
-					// Old databases may not have settings yet; fall through to the normal bootstrap path.
-				}
 				for (const stmt of [...profileAlterStmts, ...tagSchemaStmts, ...pluginSchemaStmts, ...i18nSchemaStmts, ...mediaSchemaStmts, ...progressSchemaStmts, ...notificationSchemaStmts, ...visitSchemaStmts, ...rolePermissionSchemaStmts, ...oauthSchemaStmts]) {
 					try {
 						await db.prepare(stmt).run();

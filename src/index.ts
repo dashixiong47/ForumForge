@@ -37,10 +37,13 @@ import { FALLBACK_LOCALE, normalizeLocaleValue, pickLocaleFromAcceptLanguage } f
 import { decodePublicId, publicPostPath } from './core/id-codec';
 import { handleOAuthRequest, loadOAuthPublicProviders } from './auth/oauth';
 import { isLocalRequest } from './core/env';
-import worldMap from './assets/maps/world.json';
 import { CATEGORY_ICONS } from './assets/category-icons';
+import {
+	kvDeleteSettings, kvDeleteCategories, kvGetCategories, kvSetCategories,
+	kvGetAllSettings, kvSetAllSettings, kvCheckRateLimit,
+} from './core/kv';
 
-const WORLD_MAP_JSON = JSON.stringify(worldMap);
+const WORLD_MAP_R2_KEY = 'static/world.json';
 const READ_CACHE_TTL_MS = 30_000;
 const HOME_CACHE_TTL_SECONDS = 300;
 const HOME_CACHE_STALE_SECONDS = 900;
@@ -93,19 +96,23 @@ export default {
 		const method = request.method;
 
 		if (url.pathname === '/assets/maps/world.json' && (method === 'GET' || method === 'HEAD')) {
-			const headers = {
+			const mapHeaders = {
 				'Content-Type': 'application/json; charset=utf-8',
 				'Cache-Control': 'public, max-age=604800, stale-while-revalidate=86400',
 				'CDN-Cache-Control': 'public, max-age=604800',
 				'Vary': 'Accept-Encoding',
 			};
-			if (method === 'HEAD') return new Response(null, { headers });
+			if (method === 'HEAD') return new Response(null, { headers: mapHeaders });
 
 			const cacheKey = new Request(`${url.origin}/assets/maps/world.json`, { method: 'GET' });
 			const cached = await caches.default.match(cacheKey);
 			if (cached) return cached;
 
-			const response = new Response(WORLD_MAP_JSON, { headers });
+			const bucket = (env as any).BUCKET as R2Bucket | undefined;
+			if (!bucket) return new Response('Not Found', { status: 404 });
+			const obj = await bucket.get(WORLD_MAP_R2_KEY);
+			if (!obj) return new Response('Not Found', { status: 404 });
+			const response = new Response(obj.body, { headers: mapHeaders });
 			ctx.waitUntil(caches.default.put(cacheKey, response.clone()).catch((e) => console.warn('world map cache failed', e)));
 			return response;
 		}
@@ -129,11 +136,6 @@ export default {
 			return response;
 		}
 
-		const db = env.DB;
-		if (!db) {
-			return Response.json({ error: 'D1 database binding DB is not configured' }, { status: 500 });
-		}
-
 		const getCookieValue = (req: Request, name: string) => {
 			const cookie = req.headers.get('Cookie') || '';
 			for (const part of cookie.split(';')) {
@@ -141,6 +143,67 @@ export default {
 				if (rawKey === name) return decodeURIComponent(rawValue.join('=') || '');
 			}
 			return '';
+		};
+
+		if (!env.DB) {
+			return Response.json({ error: 'D1 database binding DB is not configured' }, { status: 500 });
+		}
+
+		// D1 Read Replication: create a session so reads route to the nearest replica.
+		// The stored bookmark (ff_db_bm cookie) ensures read-your-writes consistency after mutations.
+		const _storedBookmark = getCookieValue(request, 'ff_db_bm');
+		let _pendingBookmark: string | null = null;
+		const _rawSession: D1Database = typeof (env.DB as any).withSession === 'function'
+			? (env.DB as any).withSession(_storedBookmark || 'first-unconstrained')
+			: env.DB;
+
+		// Proxy captures txn_bookmark from every write result automatically.
+		const db: D1Database = new Proxy(_rawSession as any, {
+			get(target, prop: string) {
+				if (prop === 'prepare') {
+					return (sql: string) => {
+						const stmt = target.prepare(sql);
+						return new Proxy(stmt as any, {
+							get(s, p: string) {
+								if (p === 'run' || p === 'all') {
+									return async (...a: any[]) => {
+										const r = await s[p](...a);
+										if (r?.meta?.txn_bookmark) _pendingBookmark = r.meta.txn_bookmark;
+										return r;
+									};
+								}
+								return typeof s[p] === 'function' ? s[p].bind(s) : s[p];
+							},
+						});
+					};
+				}
+				if (prop === 'batch') {
+					return async (stmts: any[]) => {
+						const results = await target.batch(stmts);
+						const bm = results?.[results.length - 1]?.meta?.txn_bookmark;
+						if (bm) _pendingBookmark = bm;
+						return results;
+					};
+				}
+				return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
+			},
+		}) as D1Database;
+
+		const kv = env.CACHE;
+
+		// Per-request settings cache: loaded from KV on first call, falls back to D1.
+		// Eliminates per-setting D1 round trips within a single request.
+		let _settingsMap: Record<string, string> | null = null;
+		const getSetting = async (key: string): Promise<string | null> => {
+			if (!_settingsMap) {
+				_settingsMap = await kvGetAllSettings(kv).catch(() => null);
+				if (!_settingsMap) {
+					const rows = await db.prepare('SELECT key, value FROM settings').all<{ key: string; value: string }>();
+					_settingsMap = Object.fromEntries((rows.results || []).map((r) => [r.key, r.value]));
+					ctx.waitUntil(kvSetAllSettings(kv, _settingsMap).catch(() => {}));
+				}
+			}
+			return _settingsMap[key] ?? null;
 		};
 
 		const requestLocale = () =>
@@ -197,15 +260,17 @@ export default {
 			});
 		}
 
-		// Helper to return JSON response with CORS
+		// Helper to return JSON response with CORS.
+		// If a write happened on this request (_pendingBookmark is set), injects a short-lived
+		// ff_db_bm cookie so the next read uses that bookmark and sees the write immediately.
 		const jsonResponse = (data: any, status = 200, extraHeaders?: HeadersInit) => {
-			return Response.json(data, {
-				status,
-				headers: {
-					...corsHeaders,
-					...(extraHeaders || {}),
-				},
-			});
+			const headers = new Headers({ ...corsHeaders, ...(extraHeaders as Record<string, string> || {}) });
+			if (_pendingBookmark) {
+				const secure = url.protocol === 'https:' ? '; Secure' : '';
+				headers.append('Set-Cookie', `ff_db_bm=${encodeURIComponent(_pendingBookmark)}; HttpOnly; Path=/; Max-Age=60; SameSite=Lax${secure}`);
+				_pendingBookmark = null;
+			}
+			return Response.json(data, { status, headers });
 		};
 		const publicJsonResponse = (data: any, status = 200, extraHeaders?: HeadersInit) => jsonResponse(data, status, {
 			'Cache-Control': 'public, max-age=30, stale-while-revalidate=120',
@@ -619,34 +684,41 @@ export default {
 			const locale = requestLocale();
 			const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
 			const includeAdminOnly = viewer ? canAdmin(viewer, 'categories') || canAdmin(viewer, 'posts') : false;
-			return cachedRead(`site-categories:${locale}:${includeAdminOnly ? 1 : 0}`, async () => {
-			const { results } = await db.prepare(
-				`SELECT categories.id,
-				        COALESCE(name_t.value, name_f.value, categories.name) AS name,
-				        COALESCE(desc_t.value, desc_f.value, categories.description) AS description,
-				        COALESCE(hero_t.value, hero_f.value, categories.hero_title) AS hero_title,
-				        COALESCE(hero_desc_t.value, hero_desc_f.value, categories.hero_description) AS hero_description,
-				        categories.icon_url AS icon_url,
-				        categories.enabled AS enabled,
-				        categories.admin_only AS admin_only,
-				        categories.sort_order AS sort_order,
-				        COUNT(posts.id) as post_count
-				 FROM categories
-				 LEFT JOIN posts ON posts.category_id = categories.id AND COALESCE(posts.status, 'approved') = 'approved'
-				 LEFT JOIN translations name_t ON name_t.scope = 'category:' || categories.id AND name_t.key = 'name' AND name_t.locale = ?
-				 LEFT JOIN translations name_f ON name_f.scope = 'category:' || categories.id AND name_f.key = 'name' AND name_f.locale = ?
-				 LEFT JOIN translations desc_t ON desc_t.scope = 'category:' || categories.id AND desc_t.key = 'description' AND desc_t.locale = ?
-				 LEFT JOIN translations desc_f ON desc_f.scope = 'category:' || categories.id AND desc_f.key = 'description' AND desc_f.locale = ?
-				 LEFT JOIN translations hero_t ON hero_t.scope = 'category:' || categories.id AND hero_t.key = 'hero_title' AND hero_t.locale = ?
-				 LEFT JOIN translations hero_f ON hero_f.scope = 'category:' || categories.id AND hero_f.key = 'hero_title' AND hero_f.locale = ?
-				 LEFT JOIN translations hero_desc_t ON hero_desc_t.scope = 'category:' || categories.id AND hero_desc_t.key = 'hero_description' AND hero_desc_t.locale = ?
-				 LEFT JOIN translations hero_desc_f ON hero_desc_f.scope = 'category:' || categories.id AND hero_desc_f.key = 'hero_description' AND hero_desc_f.locale = ?
-				 WHERE COALESCE(categories.enabled, 1) = 1
-				   AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)
-				 GROUP BY categories.id
-				 ORDER BY COALESCE(categories.sort_order, categories.id * 10) ASC, categories.created_at ASC, categories.id ASC`
-			).bind(locale, fallback, locale, fallback, locale, fallback, locale, fallback, includeAdminOnly ? 1 : 0).all();
-			return (results || []) as unknown as SiteCategory[];
+			const kvKey = `${locale}:${includeAdminOnly ? 1 : 0}`;
+			return cachedRead(`site-categories:${kvKey}`, async () => {
+				// KV layer: skip the complex D1 join when data is fresh
+				const kvHit = await kvGetCategories<SiteCategory[]>(kv, kvKey).catch(() => null);
+				if (kvHit) return kvHit;
+
+				const { results } = await db.prepare(
+					`SELECT categories.id,
+					        COALESCE(name_t.value, name_f.value, categories.name) AS name,
+					        COALESCE(desc_t.value, desc_f.value, categories.description) AS description,
+					        COALESCE(hero_t.value, hero_f.value, categories.hero_title) AS hero_title,
+					        COALESCE(hero_desc_t.value, hero_desc_f.value, categories.hero_description) AS hero_description,
+					        categories.icon_url AS icon_url,
+					        categories.enabled AS enabled,
+					        categories.admin_only AS admin_only,
+					        categories.sort_order AS sort_order,
+					        COUNT(posts.id) as post_count
+					 FROM categories
+					 LEFT JOIN posts ON posts.category_id = categories.id AND COALESCE(posts.status, 'approved') = 'approved'
+					 LEFT JOIN translations name_t ON name_t.scope = 'category:' || categories.id AND name_t.key = 'name' AND name_t.locale = ?
+					 LEFT JOIN translations name_f ON name_f.scope = 'category:' || categories.id AND name_f.key = 'name' AND name_f.locale = ?
+					 LEFT JOIN translations desc_t ON desc_t.scope = 'category:' || categories.id AND desc_t.key = 'description' AND desc_t.locale = ?
+					 LEFT JOIN translations desc_f ON desc_f.scope = 'category:' || categories.id AND desc_f.key = 'description' AND desc_f.locale = ?
+					 LEFT JOIN translations hero_t ON hero_t.scope = 'category:' || categories.id AND hero_t.key = 'hero_title' AND hero_t.locale = ?
+					 LEFT JOIN translations hero_f ON hero_f.scope = 'category:' || categories.id AND hero_f.key = 'hero_title' AND hero_f.locale = ?
+					 LEFT JOIN translations hero_desc_t ON hero_desc_t.scope = 'category:' || categories.id AND hero_desc_t.key = 'hero_description' AND hero_desc_t.locale = ?
+					 LEFT JOIN translations hero_desc_f ON hero_desc_f.scope = 'category:' || categories.id AND hero_desc_f.key = 'hero_description' AND hero_desc_f.locale = ?
+					 WHERE COALESCE(categories.enabled, 1) = 1
+					   AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)
+					 GROUP BY categories.id
+					 ORDER BY COALESCE(categories.sort_order, categories.id * 10) ASC, categories.created_at ASC, categories.id ASC`
+				).bind(locale, fallback, locale, fallback, locale, fallback, locale, fallback, includeAdminOnly ? 1 : 0).all();
+				const data = (results || []) as unknown as SiteCategory[];
+				ctx.waitUntil(kvSetCategories(kv, kvKey, data).catch(() => {}));
+				return data;
 			});
 		};
 
@@ -742,19 +814,23 @@ tick();setInterval(tick,1000);
 			url.pathname === '/world.json';
 
 		if (!isMaintenanceBypassPath() && !url.pathname.includes('.')) {
-			const rows = await cachedRead('settings:maintenance', () => db.prepare("SELECT key, value FROM settings WHERE key IN ('maintenance_enabled', 'maintenance_title', 'maintenance_message', 'maintenance_until')").all(), 10_000);
-			const map: Record<string, string> = {};
-			for (const row of (rows.results || []) as any[]) map[String(row.key)] = String(row.value || '');
-			if (map.maintenance_enabled === '1') {
+			// getSetting loads all settings from KV (or D1) in one shot; individual key lookups are free after that.
+			const [maintenanceEnabled, maintenanceTitle, maintenanceMessage, maintenanceUntil] = await Promise.all([
+				getSetting('maintenance_enabled'),
+				getSetting('maintenance_title'),
+				getSetting('maintenance_message'),
+				getSetting('maintenance_until'),
+			]);
+			if (maintenanceEnabled === '1') {
+				const map = { maintenance_enabled: '1', maintenance_title: maintenanceTitle || '', maintenance_message: maintenanceMessage || '', maintenance_until: maintenanceUntil || '' };
 				if (method === 'GET' && !url.pathname.startsWith('/api/')) return renderMaintenancePage(map);
-				return jsonResponse({ error: map.maintenance_title || '站点维护中', code: 'MAINTENANCE' }, 503);
+				return jsonResponse({ error: maintenanceTitle || '站点维护中', code: 'MAINTENANCE' }, 503);
 			}
 		}
 
-		const idCodecSetting = await cachedRead('settings:id-codec-secret', () => db.prepare("SELECT value FROM settings WHERE key = 'id_codec_secret'").first<DBSetting>().catch(() => null), 30_000);
 		const runtimeEnvForLinks = {
 			...(env as any),
-			ID_CODEC_SECRET: String(idCodecSetting?.value || (env as any).ID_CODEC_SECRET || '').trim(),
+			ID_CODEC_SECRET: String((await getSetting('id_codec_secret')) || (env as any).ID_CODEC_SECRET || '').trim(),
 		};
 
 		const getAllCategoryCopy = async (totalPosts?: number): Promise<SiteCategory> => {
@@ -763,7 +839,7 @@ tick();setInterval(tick,1000);
 			const [translations, systemTranslations, iconSetting] = await Promise.all([
 				loadLocalizedMaps(['category:all']),
 				getSystemTranslations(locale),
-				cachedRead('settings:all-category-icon', () => db.prepare("SELECT value FROM settings WHERE key = 'all_category_icon_url'").first<DBSetting>(), 30_000),
+				getSetting('all_category_icon_url'),
 			]);
 			const map = translations.get('category:all') || {};
 			const value = (key: string, fallbackValue: string) =>
@@ -775,7 +851,7 @@ tick();setInterval(tick,1000);
 				description: value('description', locale === 'zh-CN' ? '全部论坛帖子。' : 'All forum posts.'),
 				hero_title: value('hero_title', systemTranslations['index.hero.title'] || (locale === 'zh-CN' ? '高密度图文讨论流' : 'Media-first forum feed')),
 				hero_description: value('hero_description', systemTranslations['index.hero.desc'] || (locale === 'zh-CN' ? '快速扫读图文、视频和长文讨论。' : 'Scan posts fast. Media stays clear.')),
-				icon_url: iconSetting?.value || '',
+				icon_url: iconSetting || '',
 				post_count: count,
 			};
 		};
@@ -939,9 +1015,16 @@ tick();setInterval(tick,1000);
 
 		const invalidatePublicContent = (reason = 'content') => {
 			readCache.clear();
+			_settingsMap = null; // reset per-request settings cache
+			const isSettingsChange = reason.startsWith('settings');
+			const isCategoryChange = reason.startsWith('category') || reason.startsWith('tag');
 			ctx.waitUntil((async () => {
 				const locales = await getPublicCacheLocales();
-				await deleteHomeCacheVariants(url.origin, locales, [url.search || '']);
+				await Promise.all([
+					deleteHomeCacheVariants(url.origin, locales, [url.search || '']),
+					isSettingsChange ? kvDeleteSettings(kv).catch(() => {}) : Promise.resolve(),
+					isCategoryChange ? kvDeleteCategories(kv).catch(() => {}) : Promise.resolve(),
+				]);
 			})().catch((err) => console.warn('Failed to invalidate public content cache', reason, err)));
 		};
 
@@ -1146,6 +1229,18 @@ tick();setInterval(tick,1000);
 			getBaseUrl,
 		});
 		if (mediaApiResponse) return mediaApiResponse;
+
+		// Rate limiting for auth endpoints: prevent brute force and registration spam.
+		// Limits are per-IP per minute; best-effort via KV (non-atomic but sufficient).
+		if (method === 'POST') {
+			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+			const rlPath = url.pathname;
+			if (rlPath === '/api/login' || rlPath === '/api/register' || rlPath === '/api/auth/forgot-password') {
+				const limit = rlPath === '/api/register' ? 5 : 20;
+				const allowed = await kvCheckRateLimit(kv, `${rlPath}:${ip}`, limit, 60).catch(() => true);
+				if (!allowed) return jsonResponse({ error: 'Too many requests, please try again later.' }, 429);
+			}
+		}
 
 		const authApiResponse = await handleAuthApi({
 			request,
