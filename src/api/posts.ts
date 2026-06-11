@@ -28,6 +28,7 @@ export type PostsApiContext = {
 	awardUserProgress: (userId: number, source: any, options?: any) => Promise<any>;
 	createNotification: (targetUserId: number | string, type: string, title: string, body: string, options?: any) => Promise<void>;
 	runtimeEnvForLinks: Env;
+	invalidatePublicContent?: (reason?: string) => void;
 };
 
 const parseTagIds = (value: unknown) => {
@@ -65,6 +66,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		awardUserProgress,
 		createNotification,
 		runtimeEnvForLinks,
+		invalidatePublicContent,
 	} = ctx;
 
 	const validateTagIds = async (tagIds: number[]) => {
@@ -256,6 +258,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			if (!isAdminEdit && String(post.status || 'approved') !== 'approved' && nextStatus === 'approved') await awardUserProgress(userPayload.id, 'create_post', { postId });
 
 			await security.logAudit(userPayload.id, 'UPDATE_POST', 'post', postId, { title_length: title.length, tag_ids: tagIds, status: nextStatus }, request);
+			invalidatePublicContent?.('post:update');
 			return jsonResponse({ success: true, status: nextStatus });
 		} catch (e) {
 			return handleError(e);
@@ -280,6 +283,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			await db.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(id).run();
 			await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
 			await security.logAudit(userPayload.id, 'DELETE_POST', 'post', id, {}, request);
+			invalidatePublicContent?.('post:delete');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -325,6 +329,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 				await createNotification(Number(parentComment.author_id), 'comment_replied', '你的回复收到回复', '有人回复了你的评论。', { postId, commentId, meta: { parent_comment_id: parentComment.id } });
 			}
 			if (commentStatus === 'pending') await createNotification(userPayload.id, 'comment_pending', '评论等待审核', '你的评论已提交，管理员审核后会显示。', { postId, commentId });
+			if (commentStatus === 'approved') invalidatePublicContent?.('comment:create');
 			return jsonResponse({ success: true, id: commentId, status: commentStatus }, 201);
 		} catch (e) {
 			return handleError(e);
@@ -365,6 +370,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			await db.prepare('DELETE FROM comments WHERE parent_id = ?').bind(id).run();
 			await db.prepare('DELETE FROM comments WHERE id = ?').bind(id).run();
 			await security.logAudit(userPayload.id, 'DELETE_COMMENT', 'comment', String(id), {}, request);
+			invalidatePublicContent?.('comment:delete');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -379,10 +385,12 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			if (existing) {
 				await db.prepare('DELETE FROM likes WHERE id = ?').bind(existing.id).run();
 				const likeCount = await db.prepare('SELECT COUNT(*) AS count FROM likes WHERE post_id = ?').bind(postId).first<number>('count');
+				invalidatePublicContent?.('post:unlike');
 				return jsonResponse({ liked: false, like_count: Number(likeCount || 0) });
 			}
 			await db.prepare('INSERT INTO likes (post_id, user_id) VALUES (?, ?)').bind(postId, userPayload.id).run();
 			const likeCount = await db.prepare('SELECT COUNT(*) AS count FROM likes WHERE post_id = ?').bind(postId).first<number>('count');
+			invalidatePublicContent?.('post:like');
 			return jsonResponse({ liked: true, like_count: Number(likeCount || 0) });
 		} catch (e) {
 			return handleError(e);
@@ -439,6 +447,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			if (success && newPostId && postStatus === 'pending') await createNotification(userPayload.id, 'post_pending', '帖子等待审核', '你的帖子已提交，管理员审核后会发布。', { postId: newPostId });
 
 			await security.logAudit(userPayload.id, 'CREATE_POST', 'post', String(newPostId || 'new'), { title_length: safeTitle.length, tag_ids: tagIds, status: postStatus }, request);
+			if (postStatus === 'approved') invalidatePublicContent?.('post:create');
 			return jsonResponse({ success, id: newPostId, status: postStatus, url: newPostId ? publicPostPath(newPostId, runtimeEnvForLinks) : undefined }, 201);
 		} catch (e) {
 			return handleError(e);

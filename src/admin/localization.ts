@@ -48,10 +48,10 @@ export function contentLanguageSelector(languages?: AdminLanguage[], active = 'z
 	return `<div class="content-lang-switch">
 		<span data-i18n="admin.contentLanguage">内容语言</span>
 		<input type="hidden" data-content-locale value="${escapeHtml(active)}">
-		<details class="content-lang-menu">
-			<summary><span data-content-locale-label>${escapeHtml(languageName(current))}</span><small>${escapeHtml(languageCode(current))}</small></summary>
+		<div class="content-lang-menu">
+			<button class="content-lang-trigger" type="button" data-content-locale-trigger><span data-content-locale-label>${escapeHtml(languageName(current))}</span><small>${escapeHtml(languageCode(current))}</small></button>
 			<div class="content-lang-pop">${options}</div>
-		</details>
+		</div>
 	</div>`;
 }
 

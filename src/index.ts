@@ -38,8 +38,54 @@ import { decodePublicId, publicPostPath } from './core/id-codec';
 import { handleOAuthRequest, loadOAuthPublicProviders } from './auth/oauth';
 import { isLocalRequest } from './core/env';
 import worldMap from './assets/maps/world.json';
+import { CATEGORY_ICONS } from './assets/category-icons';
 
 const WORLD_MAP_JSON = JSON.stringify(worldMap);
+const READ_CACHE_TTL_MS = 30_000;
+const HOME_CACHE_TTL_SECONDS = 300;
+const HOME_CACHE_STALE_SECONDS = 900;
+const HOME_RENDER_CACHE_TTL_MS = HOME_CACHE_TTL_SECONDS * 1000;
+const HOME_CACHE_SEARCHES = ['', '?sort_by=time', '?sort_by=comments', '?sort_by=views'];
+
+type CacheEntry<T> = {
+	expiresAt: number;
+	value: T;
+};
+
+const readCache = new Map<string, CacheEntry<unknown>>();
+
+async function cachedRead<T>(key: string, loader: () => Promise<T>, ttlMs = READ_CACHE_TTL_MS): Promise<T> {
+	const now = Date.now();
+	const cached = readCache.get(key) as CacheEntry<T> | undefined;
+	if (cached && cached.expiresAt > now) return cached.value;
+	const value = await loader();
+	if (readCache.size > 512) readCache.clear();
+	readCache.set(key, { expiresAt: now + ttlMs, value });
+	return value;
+}
+
+function isCacheableHomeSearch(searchParams: URLSearchParams) {
+	const allowedKeys = new Set(['sort_by', 'page']);
+	for (const key of searchParams.keys()) {
+		if (!allowedKeys.has(key)) return false;
+	}
+	const page = searchParams.get('page');
+	const sortBy = searchParams.get('sort_by');
+	return (!page || page === '1') && (!sortBy || sortBy === 'time' || sortBy === 'comments' || sortBy === 'views');
+}
+
+function homeCacheRequest(origin: string, locale: string, search = '') {
+	return new Request(`${origin}/__ff-cache/home/${encodeURIComponent(locale)}${search || ''}`);
+}
+
+async function deleteHomeCacheVariants(origin: string, locales: string[], extraSearches: string[] = []) {
+	const searches = Array.from(new Set([...HOME_CACHE_SEARCHES, ...extraSearches.filter(Boolean)]));
+	await Promise.all(
+		locales.flatMap((locale) =>
+			searches.map((search) => caches.default.delete(homeCacheRequest(origin, locale, search)).catch(() => false))
+		)
+	);
+}
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -64,9 +110,61 @@ export default {
 			return response;
 		}
 
+		if (url.pathname.startsWith('/assets/category-icons/') && (method === 'GET' || method === 'HEAD')) {
+			const filename = url.pathname.split('/').pop() || '';
+			const icon = Object.values(CATEGORY_ICONS).find((item) => item.filename === filename || item.path === url.pathname);
+			if (!icon) return new Response('Not Found', { status: 404 });
+			const headers = {
+				'Content-Type': 'image/svg+xml; charset=utf-8',
+				'Cache-Control': 'public, max-age=604800, stale-while-revalidate=86400',
+				'CDN-Cache-Control': 'public, max-age=604800',
+				'Vary': 'Accept-Encoding',
+			};
+			if (method === 'HEAD') return new Response(null, { headers });
+			const cacheKey = new Request(`${url.origin}${icon.path}`, { method: 'GET' });
+			const cached = await caches.default.match(cacheKey);
+			if (cached) return cached;
+			const response = new Response(icon.svg, { headers });
+			ctx.waitUntil(caches.default.put(cacheKey, response.clone()).catch((e) => console.warn('category icon cache failed', e)));
+			return response;
+		}
+
 		const db = env.DB;
 		if (!db) {
 			return Response.json({ error: 'D1 database binding DB is not configured' }, { status: 500 });
+		}
+
+		const getCookieValue = (req: Request, name: string) => {
+			const cookie = req.headers.get('Cookie') || '';
+			for (const part of cookie.split(';')) {
+				const [rawKey, ...rawValue] = part.trim().split('=');
+				if (rawKey === name) return decodeURIComponent(rawValue.join('=') || '');
+			}
+			return '';
+		};
+
+		const requestLocale = () =>
+			normalizeLocaleValue(getCookieValue(request, 'ff_locale')) ||
+			pickLocaleFromAcceptLanguage(request.headers.get('Accept-Language')) ||
+			FALLBACK_LOCALE;
+
+		const isAnonymousRequest = !getCookieValue(request, 'ff_token');
+		const cacheableAnonymousHome = method === 'GET' && url.pathname === '/' && isAnonymousRequest && isCacheableHomeSearch(url.searchParams);
+		const homeEdgeCacheKey = cacheableAnonymousHome
+			? homeCacheRequest(url.origin, requestLocale(), url.search || '')
+			: null;
+		if (homeEdgeCacheKey) {
+			const edgeCachedHome = await caches.default.match(homeEdgeCacheKey).catch(() => null);
+			if (edgeCachedHome) {
+				const headers = new Headers(edgeCachedHome.headers);
+				headers.set('X-FF-Cache', 'edge-hit-fast');
+				headers.set('Server-Timing', 'ff;desc="home-edge-cache"');
+				return new Response(edgeCachedHome.body, {
+					status: edgeCachedHome.status,
+					statusText: edgeCachedHome.statusText,
+					headers,
+				});
+			}
 		}
 
 		// Helper function to get base URL
@@ -74,17 +172,14 @@ export default {
 			// Priority: 1. Env var 2. X-Original-URL header 3. Request origin
 			const baseUrl = (env as any).BASE_URL;
 			if (baseUrl) {
-				console.log(`✅ Using BASE_URL from env: ${baseUrl}`);
 				return baseUrl;
 			}
 			
 			const xOriginalUrl = request.headers.get('X-Original-URL');
 			if (xOriginalUrl) {
-				console.log(`✅ Using X-Original-URL header: ${xOriginalUrl}`);
 				return xOriginalUrl;
 			}
 			
-			console.warn(`⚠️ BASE_URL not configured and no X-Original-URL header, falling back to request origin: ${url.origin}`);
 			return url.origin;
 		};
 
@@ -112,6 +207,12 @@ export default {
 				},
 			});
 		};
+		const publicJsonResponse = (data: any, status = 200, extraHeaders?: HeadersInit) => jsonResponse(data, status, {
+			'Cache-Control': 'public, max-age=30, stale-while-revalidate=120',
+			'CDN-Cache-Control': 'public, max-age=30',
+			'Vary': 'Accept-Language, Cookie',
+			...(extraHeaders || {}),
+		});
 
 		// Serve R2 objects through Worker when using bucket binding
 		if (url.pathname.startsWith('/r2/') && (method === 'GET' || method === 'HEAD')) {
@@ -165,20 +266,6 @@ export default {
 				{ status: 500, headers: corsHeaders }
 			);
 		}
-
-		const getCookieValue = (req: Request, name: string) => {
-			const cookie = req.headers.get('Cookie') || '';
-			for (const part of cookie.split(';')) {
-				const [rawKey, ...rawValue] = part.trim().split('=');
-				if (rawKey === name) return decodeURIComponent(rawValue.join('=') || '');
-			}
-			return '';
-		};
-
-		const requestLocale = () =>
-			normalizeLocale(getCookieValue(request, 'ff_locale')) ||
-			pickLocaleFromAcceptLanguage(request.headers.get('Accept-Language')) ||
-			FALLBACK_LOCALE;
 
 		const authCookie = (token: string, expiresAt: number) => {
 			const maxAge = Math.max(0, expiresAt - Math.floor(Date.now() / 1000));
@@ -532,6 +619,7 @@ export default {
 			const locale = requestLocale();
 			const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
 			const includeAdminOnly = viewer ? canAdmin(viewer, 'categories') || canAdmin(viewer, 'posts') : false;
+			return cachedRead(`site-categories:${locale}:${includeAdminOnly ? 1 : 0}`, async () => {
 			const { results } = await db.prepare(
 				`SELECT categories.id,
 				        COALESCE(name_t.value, name_f.value, categories.name) AS name,
@@ -559,11 +647,13 @@ export default {
 				 ORDER BY COALESCE(categories.sort_order, categories.id * 10) ASC, categories.created_at ASC, categories.id ASC`
 			).bind(locale, fallback, locale, fallback, locale, fallback, locale, fallback, includeAdminOnly ? 1 : 0).all();
 			return (results || []) as unknown as SiteCategory[];
+			});
 		};
 
 		const getSiteTags = async (): Promise<SiteTag[]> => {
 			const locale = requestLocale();
 			const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
+			return cachedRead(`site-tags:${locale}`, async () => {
 			const { results } = await db.prepare(
 				`SELECT tags.id,
 				        COALESCE(name_t.value, name_f.value, tags.name) AS name,
@@ -576,6 +666,7 @@ export default {
 				 ORDER BY name ASC`
 			).bind(locale, fallback).all();
 			return (results || []) as unknown as SiteTag[];
+			});
 		};
 
 		const applyLocalizedCategoriesToPosts = <T extends { category_id?: number | string | null; category_name?: string | null }>(posts: T[], categories: SiteCategory[]) => {
@@ -651,7 +742,7 @@ tick();setInterval(tick,1000);
 			url.pathname === '/world.json';
 
 		if (!isMaintenanceBypassPath() && !url.pathname.includes('.')) {
-			const rows = await db.prepare("SELECT key, value FROM settings WHERE key IN ('maintenance_enabled', 'maintenance_title', 'maintenance_message', 'maintenance_until')").all();
+			const rows = await cachedRead('settings:maintenance', () => db.prepare("SELECT key, value FROM settings WHERE key IN ('maintenance_enabled', 'maintenance_title', 'maintenance_message', 'maintenance_until')").all(), 10_000);
 			const map: Record<string, string> = {};
 			for (const row of (rows.results || []) as any[]) map[String(row.key)] = String(row.value || '');
 			if (map.maintenance_enabled === '1') {
@@ -660,7 +751,7 @@ tick();setInterval(tick,1000);
 			}
 		}
 
-		const idCodecSetting = await db.prepare("SELECT value FROM settings WHERE key = 'id_codec_secret'").first<DBSetting>().catch(() => null);
+		const idCodecSetting = await cachedRead('settings:id-codec-secret', () => db.prepare("SELECT value FROM settings WHERE key = 'id_codec_secret'").first<DBSetting>().catch(() => null), 30_000);
 		const runtimeEnvForLinks = {
 			...(env as any),
 			ID_CODEC_SECRET: String(idCodecSetting?.value || (env as any).ID_CODEC_SECRET || '').trim(),
@@ -672,7 +763,7 @@ tick();setInterval(tick,1000);
 			const [translations, systemTranslations, iconSetting] = await Promise.all([
 				loadLocalizedMaps(['category:all']),
 				getSystemTranslations(locale),
-				db.prepare("SELECT value FROM settings WHERE key = 'all_category_icon_url'").first<DBSetting>(),
+				cachedRead('settings:all-category-icon', () => db.prepare("SELECT value FROM settings WHERE key = 'all_category_icon_url'").first<DBSetting>(), 30_000),
 			]);
 			const map = translations.get('category:all') || {};
 			const value = (key: string, fallbackValue: string) =>
@@ -753,13 +844,16 @@ tick();setInterval(tick,1000);
 		};
 
 		const getEnabledLanguages = async () => {
+			return cachedRead('languages:enabled', async () => {
 			const { results } = await db.prepare(
 				'SELECT code, name, native_name, enabled, sort_order FROM languages WHERE enabled = 1 ORDER BY sort_order ASC, code ASC'
 			).all();
 			return results || [];
+			});
 		};
 
 		const getSystemTranslations = async (locale: string) => {
+			return cachedRead(`i18n:system:${locale}`, async () => {
 			const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
 			const { results } = await db.prepare(
 				`SELECT key,
@@ -777,10 +871,13 @@ tick();setInterval(tick,1000);
 				map[String(row.key)] = String(row.value || row.key);
 			}
 			return map;
+			});
 		};
 
 		const loadLocalizedMaps = async (scopes: string[]) => {
 			if (!scopes.length) return new Map<string, Record<string, Record<string, string>>>();
+			const cacheKey = `i18n:maps:${scopes.slice().sort().join('|')}`;
+			return cachedRead(cacheKey, async () => {
 			const placeholders = scopes.map(() => '?').join(',');
 			const { results } = await db.prepare(
 				`SELECT scope, key, locale, value FROM translations WHERE scope IN (${placeholders}) ORDER BY scope, key, locale`
@@ -797,6 +894,7 @@ tick();setInterval(tick,1000);
 				map.set(scope, scopeMap);
 			}
 			return map;
+			});
 		};
 
 		const saveLocalizedFields = async (scope: string, localized: unknown, allowedFields: string[], fallbacks: Record<string, string> = {}) => {
@@ -826,6 +924,25 @@ tick();setInterval(tick,1000);
 				}
 			}
 			if (batch.length) await db.batch(batch);
+		};
+
+		const getPublicCacheLocales = async () => {
+			const locales = new Set<string>([requestLocale(), FALLBACK_LOCALE, 'zh-CN', 'en-US'].map(normalizeLocale).filter(Boolean));
+			try {
+				for (const lang of await getEnabledLanguages()) {
+					const code = normalizeLocale((lang as any).code);
+					if (code) locales.add(code);
+				}
+			} catch {}
+			return Array.from(locales);
+		};
+
+		const invalidatePublicContent = (reason = 'content') => {
+			readCache.clear();
+			ctx.waitUntil((async () => {
+				const locales = await getPublicCacheLocales();
+				await deleteHomeCacheVariants(url.origin, locales, [url.search || '']);
+			})().catch((err) => console.warn('Failed to invalidate public content cache', reason, err)));
 		};
 
 		const requireAdminPage = async () => {
@@ -863,7 +980,7 @@ tick();setInterval(tick,1000);
 			getBaseUrl,
 		});
 		if (oauthResponse) return oauthResponse;
-		const siteRouteResponse = await renderSiteRoute({
+		const siteRouteContext = {
 			method,
 			url,
 			env: runtimeEnvForLinks,
@@ -877,7 +994,30 @@ tick();setInterval(tick,1000);
 			getOAuthProviders: () => loadOAuthPublicProviders(db, env, getBaseUrl),
 			attachTagsToPosts,
 			applyLocalizedCategoriesToPosts,
-		});
+		};
+		if (cacheableAnonymousHome) {
+			const cachedHome = await cachedRead(`html:home:${requestLocale()}:${url.search}`, async () => {
+				const response = await renderSiteRoute(siteRouteContext);
+				if (!response || response.status !== 200) return null;
+				return { status: response.status, html: await response.text() };
+			}, HOME_RENDER_CACHE_TTL_MS);
+			if (cachedHome) {
+				const response = siteHtmlResponse(cachedHome.html, cachedHome.status, {
+					'Cache-Control': `public, max-age=${HOME_CACHE_TTL_SECONDS}, stale-while-revalidate=${HOME_CACHE_STALE_SECONDS}`,
+					'CDN-Cache-Control': `public, max-age=${HOME_CACHE_TTL_SECONDS}`,
+					'Vary': 'Accept-Language, Cookie',
+					'X-FF-Cache': 'rendered',
+					'Server-Timing': 'ff;desc="home-render-cache"',
+				});
+				if (homeEdgeCacheKey) ctx.waitUntil(caches.default.put(homeEdgeCacheKey, response.clone()).catch(() => undefined));
+				if (shouldRecordVisit(response)) {
+					ctx.waitUntil(recordVisit().catch((err) => console.warn('Failed to record visit event', err)));
+				}
+				return response;
+			}
+		}
+
+		const siteRouteResponse = await renderSiteRoute(siteRouteContext);
 		if (siteRouteResponse) {
 			if (shouldRecordVisit(siteRouteResponse)) {
 				ctx.waitUntil(recordVisit().catch((err) => console.warn('Failed to record visit event', err)));
@@ -924,7 +1064,7 @@ tick();setInterval(tick,1000);
 			method,
 			env,
 			db,
-			jsonResponse,
+			jsonResponse: isAnonymousRequest && (url.pathname === '/api/config' || url.pathname === '/api/i18n') ? publicJsonResponse : jsonResponse,
 			handleError,
 			requestLocale,
 			normalizeLocale,
@@ -974,6 +1114,7 @@ tick();setInterval(tick,1000);
 			authenticateAdminForPath: () => authenticateAdmin(request, adminPermissionForApiPath(url.pathname)),
 			normalizeLocale,
 			saveLocalizedFields,
+			invalidatePublicContent,
 		});
 		if (adminSettingsApiResponse) return adminSettingsApiResponse;
 
@@ -1068,6 +1209,7 @@ tick();setInterval(tick,1000);
 			awardUserProgress,
 			createNotification,
 			runtimeEnvForLinks: runtimeEnvForLinks as Env,
+			invalidatePublicContent,
 		});
 		if (postsApiResponse) return postsApiResponse;
 
@@ -1077,7 +1219,7 @@ tick();setInterval(tick,1000);
 			method,
 			db,
 			security,
-			jsonResponse,
+			jsonResponse: isAnonymousRequest && (url.pathname === '/api/categories' || url.pathname === '/api/tags') ? publicJsonResponse : jsonResponse,
 			handleError,
 			apiAdminUser,
 			authenticate,
@@ -1087,6 +1229,7 @@ tick();setInterval(tick,1000);
 			saveLocalizedFields,
 			getSiteCategories,
 			getSiteTags,
+			invalidatePublicContent,
 		});
 		if (taxonomyApiResponse) return taxonomyApiResponse;
 
@@ -1130,6 +1273,7 @@ tick();setInterval(tick,1000);
 					await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
 				}
 				await security.logAudit(userPayload.id, 'ADMIN_BULK_DELETE_POSTS', 'post', ids.join(','), {}, request);
+				invalidatePublicContent('admin:posts:bulk-delete');
 				return jsonResponse({ success: true, deleted: ids.length });
 			} catch (e) {
 				return handleError(e);
@@ -1158,6 +1302,7 @@ tick();setInterval(tick,1000);
 				await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
 				
 				await security.logAudit(userPayload.id, 'ADMIN_DELETE_POST', 'post', String(id), {}, request);
+				invalidatePublicContent('admin:post:delete');
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -1182,6 +1327,7 @@ tick();setInterval(tick,1000);
 
 				await db.prepare('UPDATE comments SET content = ? WHERE id = ?').bind(content.trim(), id).run();
 				await security.logAudit(userPayload.id, 'ADMIN_UPDATE_COMMENT', 'comment', String(id), { content_length: content.length }, request);
+				invalidatePublicContent('admin:comment:update');
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -1229,6 +1375,7 @@ tick();setInterval(tick,1000);
 					await createNotification(Number(comment.author_id), nextStatus === 'approved' ? 'comment_approved' : 'comment_rejected', nextStatus === 'approved' ? '评论已通过审核' : '评论被拒绝', nextStatus === 'approved' ? '你的评论已显示。' : reason || '你的评论未通过审核。', { postId: comment.post_id, commentId: id });
 					await security.logAudit(userPayload.id, 'MODERATE_COMMENT', 'comment', String(id), { status: nextStatus, reason }, request);
 				}
+				invalidatePublicContent(`moderation:${type}:${nextStatus}`);
 				return jsonResponse({ success: true, status: nextStatus, url: moderatedPostId ? publicPostPath(moderatedPostId, runtimeEnvForLinks) : undefined });
 			} catch (e) {
 				return handleError(e);
@@ -1283,6 +1430,7 @@ tick();setInterval(tick,1000);
 					}
 				}
 				await security.logAudit(userPayload.id, 'BULK_MODERATION_STATUS', 'moderation', String(updated), { status: nextStatus, requested: items.length, reason }, request);
+				if (updated) invalidatePublicContent(`moderation:bulk-status:${nextStatus}`);
 				return jsonResponse({ success: true, status: nextStatus, count: updated });
 			} catch (e) {
 				return handleError(e);
@@ -1334,6 +1482,7 @@ tick();setInterval(tick,1000);
 					}
 				}
 				await security.logAudit(userPayload.id, 'BULK_MODERATION_DELETE', 'moderation', String(deleted), { requested: items.length }, request);
+				if (deleted) invalidatePublicContent('moderation:bulk-delete');
 				return jsonResponse({ success: true, count: deleted });
 			} catch (e) {
 				return handleError(e);
@@ -1374,6 +1523,7 @@ tick();setInterval(tick,1000);
 					}
 					await security.logAudit(userPayload.id, 'MODERATION_DELETE_COMMENT', 'comment', String(id), {}, request);
 				}
+				invalidatePublicContent(`moderation:${type}:delete`);
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -1411,6 +1561,7 @@ tick();setInterval(tick,1000);
 					}
 				}
 				await security.logAudit(userPayload.id, 'ADMIN_BULK_DELETE_COMMENTS', 'comment', ids.join(','), { deleted }, request);
+				if (deleted) invalidatePublicContent('admin:comments:bulk-delete');
 				return jsonResponse({ success: true, deleted });
 			} catch (e) {
 				return handleError(e);
@@ -1439,6 +1590,7 @@ tick();setInterval(tick,1000);
 				}
 				
 				await security.logAudit(userPayload.id, 'ADMIN_DELETE_COMMENT', 'comment', String(id), {}, request);
+				invalidatePublicContent('admin:comment:delete');
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -1456,6 +1608,7 @@ tick();setInterval(tick,1000);
 				await db.prepare('UPDATE posts SET is_pinned = ? WHERE id = ?').bind(pinned ? 1 : 0, id).run();
 				
 				await security.logAudit(userPayload.id, 'ADMIN_PIN_POST', 'post', id, { pinned }, request);
+				invalidatePublicContent('admin:post:pin');
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -1473,6 +1626,7 @@ tick();setInterval(tick,1000);
 				await db.prepare('UPDATE posts SET is_category_pinned = ? WHERE id = ?').bind(pinned ? 1 : 0, id).run();
 				
 				await security.logAudit(userPayload.id, 'ADMIN_CATEGORY_PIN_POST', 'post', id, { pinned }, request);
+				invalidatePublicContent('admin:post:category-pin');
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -1497,6 +1651,7 @@ tick();setInterval(tick,1000);
 				await db.prepare('UPDATE posts SET category_id = ? WHERE id = ?').bind(category_id || null, id).run();
 				
 				await security.logAudit(userPayload.id, 'ADMIN_MOVE_POST', 'post', id, { category_id }, request);
+				invalidatePublicContent('admin:post:move');
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);

@@ -18,6 +18,7 @@ export type TaxonomyApiContext = {
 	saveLocalizedFields: (scope: string, localized: unknown, allowedFields: string[], fallbacks?: Record<string, string>) => Promise<void>;
 	getSiteCategories: (viewer?: any) => Promise<any[]>;
 	getSiteTags: () => Promise<any[]>;
+	invalidatePublicContent?: (reason?: string) => void;
 };
 
 const normalizeTagName = (value: unknown) => {
@@ -43,6 +44,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 		saveLocalizedFields,
 		getSiteCategories,
 		getSiteTags,
+		invalidatePublicContent,
 	} = ctx;
 
 	if (url.pathname === '/api/categories' && method === 'GET') {
@@ -82,6 +84,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 				await saveLocalizedFields(`tag:${tagId}`, localized, ['name'], { [locale]: name });
 			}
 			await security.logAudit(userPayload.id, 'CREATE_TAG', 'tag', name, {}, request);
+			invalidatePublicContent?.('tag:create');
 			return jsonResponse({ success: result.success, id: tagId || undefined });
 		} catch (e) {
 			return handleError(e);
@@ -104,6 +107,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 				deleted += Number(result.meta?.changes || 0);
 			}
 			await security.logAudit(userPayload.id, 'BULK_DELETE_TAGS', 'tag', ids.join(','), { deleted }, request);
+			if (deleted) invalidatePublicContent?.('tag:bulk-delete');
 			return jsonResponse({ success: true, deleted });
 		} catch (e) {
 			return handleError(e);
@@ -125,6 +129,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 			const localized = body.localized && typeof body.localized === 'object' ? body.localized : { name: { [locale]: name } };
 			await saveLocalizedFields(`tag:${id}`, localized, ['name'], { [locale]: name });
 			await security.logAudit(userPayload.id, 'UPDATE_TAG', 'tag', id, { name }, request);
+			invalidatePublicContent?.('tag:update');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -138,6 +143,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 			await db.prepare('DELETE FROM post_tags WHERE tag_id = ?').bind(id).run();
 			await db.prepare('DELETE FROM tags WHERE id = ?').bind(id).run();
 			await security.logAudit(userPayload.id, 'DELETE_TAG', 'tag', id, {}, request);
+			invalidatePublicContent?.('tag:delete');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -169,6 +175,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 				});
 			}
 			await security.logAudit(userPayload.id, 'CREATE_CATEGORY', 'category', name, {}, request);
+			invalidatePublicContent?.('category:create');
 			return jsonResponse({ success: result.success, id: categoryId || undefined });
 		} catch (e) {
 			return handleError(e);
@@ -189,6 +196,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 			const update = db.prepare('UPDATE categories SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
 			await db.batch(ids.map((id: number, index: number) => update.bind((index + 1) * 10, id)));
 			await security.logAudit(userPayload.id, 'REORDER_CATEGORIES', 'category', 'all', { ids }, request);
+			invalidatePublicContent?.('category:reorder');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -214,6 +222,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 			});
 			await db.prepare("INSERT INTO settings (key, value) VALUES ('all_category_icon_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(iconUrl).run();
 			await security.logAudit(userPayload.id, 'UPDATE_SYSTEM_CATEGORY', 'category', 'all', { name }, request);
+			invalidatePublicContent?.('category:all-update');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -242,6 +251,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 				[locale]: '',
 			});
 			await security.logAudit(userPayload.id, 'UPDATE_CATEGORY', 'category', id, { name, description, hero_title }, request);
+			invalidatePublicContent?.('category:update');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -259,6 +269,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 
 			await db.prepare('DELETE FROM categories WHERE id = ?').bind(id).run();
 			await security.logAudit(userPayload.id, 'DELETE_CATEGORY', 'category', id, {}, request);
+			invalidatePublicContent?.('category:delete');
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);

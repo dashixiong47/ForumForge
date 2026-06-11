@@ -6,6 +6,7 @@ import { DEFAULT_PROGRESS_REWARDS, PROGRESS_REWARD_KEYS, type ProgressSource } f
 import { readStringEnv } from '../core/env';
 import { hashPassword } from '../core/password';
 import { FORUMFORGE_ICON_DATA_URL, FORUMFORGE_ICON_FILENAME, FORUMFORGE_ICON_KEY, FORUMFORGE_ICON_SVG } from '../assets/brand';
+import { CATEGORY_ICONS } from '../assets/category-icons';
 
 const BOOTSTRAP_VERSION = '2026-06-11.2';
 
@@ -76,11 +77,18 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 				editor: demoImage('Editor Flow', '#2b2a12', 'ForumForge', true),
 				theme: demoImage('Theme Layers', '#301d2a', 'ForumForge', true),
 			};
+			const categoryIconMedia = Object.values(CATEGORY_ICONS).map((icon) =>
+				db.prepare(
+					`INSERT OR IGNORE INTO media_assets (scope, key, url, filename, mime_type, size_bytes, media_type, source, updated_at)
+					 VALUES ('system', ?, ?, ?, 'image/svg+xml', ?, 'image', 'builtin', CURRENT_TIMESTAMP)`
+				).bind(icon.key, icon.path, icon.filename, icon.svg.length)
+			);
 			await db.batch([
 				db.prepare(
 					`INSERT OR IGNORE INTO media_assets (scope, key, url, filename, mime_type, size_bytes, media_type, source, updated_at)
 					 VALUES ('system', ?, ?, ?, 'image/svg+xml', ?, 'image', 'builtin', CURRENT_TIMESTAMP)`
 				).bind(FORUMFORGE_ICON_KEY, FORUMFORGE_ICON_DATA_URL, FORUMFORGE_ICON_FILENAME, FORUMFORGE_ICON_SVG.length),
+				...categoryIconMedia,
 				db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('site_name', 'ForumForge')"),
 				db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('site_tagline', 'Media-first discussion hub')"),
 				db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('site_icon_url', ?)").bind(FORUMFORGE_ICON_DATA_URL),
@@ -97,6 +105,11 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 				db.prepare("UPDATE categories SET description = COALESCE(NULLIF(description, ''), 'Progress notes for projects and plugins.'), hero_title = COALESCE(NULLIF(hero_title, ''), 'Build Logs'), hero_description = COALESCE(NULLIF(hero_description, ''), 'Track implementation notes and release progress.') WHERE id = 2"),
 				db.prepare("UPDATE categories SET description = COALESCE(NULLIF(description, ''), 'Media-rich examples and demos.'), hero_title = COALESCE(NULLIF(hero_title, ''), 'Showcase'), hero_description = COALESCE(NULLIF(hero_description, ''), 'Media-rich posts, previews, and demos.') WHERE id = 3"),
 				db.prepare("UPDATE categories SET description = COALESCE(NULLIF(description, ''), 'Proposals and product decisions.'), hero_title = COALESCE(NULLIF(hero_title, ''), 'Ideas'), hero_description = COALESCE(NULLIF(hero_description, ''), 'Short proposals and design discussions.') WHERE id = 4"),
+				db.prepare("UPDATE categories SET icon_url = ? WHERE name = 'Announcements' AND (icon_url IS NULL OR icon_url = '')").bind(CATEGORY_ICONS.announcements.path),
+				db.prepare("UPDATE categories SET icon_url = ? WHERE name = 'WebUIX' AND (icon_url IS NULL OR icon_url = '')").bind(CATEGORY_ICONS.webuix.path),
+				db.prepare("UPDATE categories SET icon_url = ? WHERE name = 'Help' AND (icon_url IS NULL OR icon_url = '')").bind(CATEGORY_ICONS.help.path),
+				db.prepare("UPDATE categories SET icon_url = ? WHERE name = 'Showcase' AND (icon_url IS NULL OR icon_url = '')").bind(CATEGORY_ICONS.showcase.path),
+				db.prepare("UPDATE categories SET icon_url = ? WHERE name = 'General' AND (icon_url IS NULL OR icon_url = '')").bind(CATEGORY_ICONS.general.path),
 				db.prepare('UPDATE categories SET sort_order = id * 10 WHERE sort_order IS NULL OR sort_order = 0'),
 			]);
 			const ensurePendingModerationSamples = async () => {

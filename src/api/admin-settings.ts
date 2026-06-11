@@ -14,6 +14,7 @@ export type AdminSettingsApiContext = {
 	authenticateAdminForPath: () => Promise<UserPayload>;
 	normalizeLocale: (value: unknown) => string;
 	saveLocalizedFields: (scope: string, localized: unknown, allowedFields: string[], fallbacks?: Record<string, string>) => Promise<void>;
+	invalidatePublicContent?: (reason?: string) => void;
 };
 
 export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Promise<Response | null> {
@@ -28,6 +29,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 		authenticateAdminForPath,
 		normalizeLocale,
 		saveLocalizedFields,
+		invalidatePublicContent,
 	} = ctx;
 		if (url.pathname === '/api/admin/settings' && method === 'GET') {
 			try {
@@ -177,6 +179,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 					await saveLocalizedFields('settings', localized, ['site_name', 'site_tagline']);
 				}
 
+				invalidatePublicContent?.('settings:update');
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
