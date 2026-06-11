@@ -26,6 +26,7 @@ screenshots/
 # Local Wrangler state
 wrangler.*.local.jsonc
 .wrangler/
+.wrangler-dry/
 
 # TypeScript
 *.tsbuildinfo
