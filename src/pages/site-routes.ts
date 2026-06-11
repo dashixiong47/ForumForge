@@ -53,14 +53,6 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			if (method !== 'GET' && method !== 'HEAD') return null;
 			if (url.pathname.startsWith('/api') || url.pathname.startsWith('/admin') || url.pathname.startsWith('/r2/')) return null;
 
-			const user = await getCurrentSiteUser();
-			const categories = await getSiteCategories(user);
-			const getLevelSettings = async () => normalizeLevelSettings({
-				maxLevel: await settingNumber(LEVEL_SETTING_KEYS.maxLevel, DEFAULT_LEVEL_SETTINGS.maxLevel),
-				baseExperience: await settingNumber(LEVEL_SETTING_KEYS.baseExperience, DEFAULT_LEVEL_SETTINGS.baseExperience),
-				growth: await settingNumber(LEVEL_SETTING_KEYS.growth, DEFAULT_LEVEL_SETTINGS.growth),
-			});
-
 			if (url.pathname === '/logout') {
 				return new Response(null, {
 					status: 302,
@@ -76,6 +68,14 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			if (url.pathname === '/register') return siteHtmlResponse(renderAuthPage('register', '', getOAuthProviders ? await getOAuthProviders() : []));
 			if (url.pathname === '/forgot') return siteHtmlResponse(renderAuthPage('forgot'));
 			if (url.pathname === '/reset') return siteHtmlResponse(renderAuthPage('reset', url.searchParams.get('token') || ''));
+
+			const user = await getCurrentSiteUser();
+			const categories = await getSiteCategories(user);
+			const getLevelSettings = async () => normalizeLevelSettings({
+				maxLevel: await settingNumber(LEVEL_SETTING_KEYS.maxLevel, DEFAULT_LEVEL_SETTINGS.maxLevel),
+				baseExperience: await settingNumber(LEVEL_SETTING_KEYS.baseExperience, DEFAULT_LEVEL_SETTINGS.baseExperience),
+				growth: await settingNumber(LEVEL_SETTING_KEYS.growth, DEFAULT_LEVEL_SETTINGS.growth),
+			});
 
 			if (url.pathname === '/settings') {
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });

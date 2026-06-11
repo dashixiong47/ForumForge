@@ -86,6 +86,17 @@ async function settingValue(db: D1Database, key: string): Promise<string> {
 	return String(row?.value || '').trim();
 }
 
+async function settingValues(db: D1Database, keys: string[]): Promise<Record<string, string>> {
+	if (!keys.length) return {};
+	const placeholders = keys.map(() => '?').join(',');
+	const { results } = await db.prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`).bind(...keys).all();
+	const map: Record<string, string> = {};
+	for (const row of (results || []) as any[]) {
+		map[String(row.key)] = String(row.value || '').trim();
+	}
+	return map;
+}
+
 function oauthBaseUrl(env: Env, getBaseUrl: () => string): string {
 	return (envValue(env, 'OAUTH_REDIRECT_BASE') || getBaseUrl()).replace(/\/+$/, '');
 }
@@ -107,9 +118,25 @@ async function loadOAuthConfig(db: D1Database, env: Env, getBaseUrl: () => strin
 }
 
 export async function loadOAuthPublicProviders(db: D1Database, env: Env, getBaseUrl: () => string): Promise<OAuthPublicProvider[]> {
-	const configs = await Promise.all(OAUTH_PROVIDER_IDS.map((id) => loadOAuthConfig(db, env, getBaseUrl, id)));
-	return configs
-		.filter((config) => config.enabled)
+	const keys = OAUTH_PROVIDER_IDS.flatMap((id) => [
+		`oauth_${id}_enabled`,
+		`oauth_${id}_client_id`,
+		`oauth_${id}_client_secret`,
+	]);
+	const values = await settingValues(db, keys);
+	return OAUTH_PROVIDER_IDS
+		.map((id) => {
+			const meta = PROVIDERS[id];
+			const prefix = meta.envPrefix;
+			return {
+				id,
+				label: meta.label,
+				enabled: values[`oauth_${id}_enabled`] === '1',
+				clientId: values[`oauth_${id}_client_id`] || envValue(env, `${prefix}_CLIENT_ID`),
+				clientSecret: values[`oauth_${id}_client_secret`] || envValue(env, `${prefix}_CLIENT_SECRET`),
+			};
+		})
+		.filter((config) => config.enabled && config.clientId && config.clientSecret)
 		.map((config) => ({ id: config.id, label: config.label }));
 }
 
