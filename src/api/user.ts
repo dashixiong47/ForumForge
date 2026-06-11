@@ -237,12 +237,16 @@ export async function handleUserApi(ctx: UserApiContext): Promise<Response | nul
 			const body = await request.json() as any;
 			const { new_email } = body;
 			if (!new_email) return jsonResponse({ error: 'Missing parameters' }, 400);
-			if (new_email.length > 50) return jsonResponse({ error: 'Email too long (Max 50 chars)' }, 400);
+			if (new_email.length > 254) return jsonResponse({ error: 'Email too long' }, 400);
 
 			const user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(userPayload.id).first<DBUser>();
 			if (!user) return jsonResponse({ error: 'User not found' }, 404);
 
-			const exists = await db.prepare('SELECT id FROM users WHERE email = ?').bind(new_email).first();
+			if (user.email && user.email.toLowerCase() === new_email.toLowerCase()) {
+				return jsonResponse({ error: '该邮箱已是您当前绑定的邮箱。' }, 400);
+			}
+
+			const exists = await db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').bind(new_email, user.id).first();
 			if (exists) return jsonResponse({ error: 'Email already in use' }, 400);
 
 			const token = generateToken();
