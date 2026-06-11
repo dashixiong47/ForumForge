@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+
+# Local verification artifacts
+tmp-*/
+tmp-*
+tmp-*.*
+tmp-dashboard-*.png
+playwright-report/
+test-results/
+screenshots/
+*.tmp
+*.bak
+
+# Local environment
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars*
+!.dev.vars.example
+
+# Local Wrangler state
+wrangler.*.local.jsonc
+.wrangler/
+
+# TypeScript
+*.tsbuildinfo
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

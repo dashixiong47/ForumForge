@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN show_public_posts INTEGER DEFAULT 1;

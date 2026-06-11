@@ -1,0 +1,84 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "forumforge",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-09-27",
+	"compatibility_flags": [
+		"global_fetch_strictly_public"
+	],
+	"observability": {
+		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "forumforge-db",
+			"database_id": "fff20255-a2a1-4cac-be25-460ef30f9369",
+			"remote": true,
+			"migrations_dir": "migrations"
+		}
+	],
+	/**
+	 * R2 Object Storage (for image uploads)
+	 * https://developers.cloudflare.com/r2/api/workers/workers-api-reference/
+	 */
+	"r2_buckets": [
+		{
+			"binding": "BUCKET",
+			"bucket_name": "forumforge-images"
+		}
+	],
+	/**
+	 * Enable default *.workers.dev domain
+	 */
+	"workers_dev": true,
+	"send_email": [
+		{
+			"name": "EMAIL",
+			"remote": true
+		}
+	],
+	"routes": [
+		{
+			"pattern": "dsxforge.com",
+			"custom_domain": true
+		}
+	],
+	/**
+	 * Smart Placement
+	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
+	 */
+	// "placement": {  "mode": "smart" }
+	/**
+	 * Bindings
+	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
+	 * databases, object storage, AI inference, real-time communication and more.
+	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
+	 */
+	/**
+	 * Environment Variables
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 * Note: Use secrets to store sensitive data.
+	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 * 
+	 * IMPORTANT: Set JWT_SECRET as a secret (NOT here):
+	 * wrangler secret put JWT_SECRET
+	 * Generate a random value with: head -c 32 /dev/urandom | base64
+	 */
+	// "vars": {  "MY_VARIABLE": "production_value" }
+	/**
+	 * Service Bindings (communicate between multiple Workers)
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
+	 */
+	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+	
+	"vars": {
+		"WORKER_URL": "https://dsxforge.com",
+		"BASE_URL": "https://dsxforge.com",
+		"OAUTH_REDIRECT_BASE": "https://dsxforge.com"
+	}
+}

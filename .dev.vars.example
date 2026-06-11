@@ -1,0 +1,34 @@
+# Wrangler local runtime variables.
+# Copy to .dev.vars for local development. Do not commit .dev.vars.
+
+BASE_URL=https://dsxforge.com
+WORKER_URL=https://dsxforge.com
+JWT_SECRET=replace-with-at-least-32-characters
+ID_CODEC_SECRET=replace-with-stable-random-id-codec-secret
+
+ADMIN_EMAIL=admin@example.com
+ADMIN_USERNAME=Admin
+ADMIN_PASSWORD=replace-with-initial-admin-password
+
+SMTP_HOST=
+SMTP_PORT=
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM=noreply@dsxforge.com
+SMTP_FROM_NAME=DSXForge
+
+# Optional: Resend API fallback.
+RESEND_KEY=
+RESEND_SEND=
+
+TURNSTILE_SITE_KEY=
+TURNSTILE_SECRET_KEY=
+
+# Optional OAuth providers. Site settings can override these values.
+OAUTH_REDIRECT_BASE=https://dsxforge.com
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+EPIC_CLIENT_ID=
+EPIC_CLIENT_SECRET=

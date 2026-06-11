@@ -1,0 +1,28 @@
+{
+	"name": "forumforge",
+	"version": "0.0.0",
+	"private": true,
+	"author": "adysec",
+	"scripts": {
+		"dev": "wrangler dev --local",
+		"sync:settings": "node scripts/sync-settings-from-env.mjs",
+		"sync:settings:local": "node scripts/sync-settings-from-env.mjs --local",
+		"deploy": "npm run typecheck && npm run sync:settings && wrangler deploy",
+		"deploy:worker": "npm run deploy",
+		"start": "npm run dev",
+		"typecheck": "tsc --noEmit --pretty false",
+		"cf-typegen": "wrangler types"
+	},
+	"devDependencies": {
+		"typescript": "^5.5.2",
+		"wrangler": "^4.60.0"
+	},
+	"dependencies": {
+		"aws4fetch": "^1.0.20",
+		"dompurify": "^3.2.7",
+		"jose": "^6.1.3",
+		"marked": "^16.3.0",
+		"otpauth": "^9.4.1",
+		"qrcode": "^1.5.4"
+	}
+}

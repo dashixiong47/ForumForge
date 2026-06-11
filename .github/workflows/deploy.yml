@@ -1,0 +1,127 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Worker
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Create private Wrangler config
+        run: |
+          set -euo pipefail
+          cat > wrangler.ci.jsonc <<EOF
+          {
+            "\$schema": "node_modules/wrangler/config-schema.json",
+            "name": "${WORKER_NAME}",
+            "main": "src/index.ts",
+            "compatibility_date": "2025-09-27",
+            "compatibility_flags": ["global_fetch_strictly_public"],
+            "observability": { "enabled": true },
+            "assets": {
+              "directory": "./public",
+              "binding": "ASSETS"
+            },
+            "d1_databases": [
+              {
+                "binding": "DB",
+                "database_name": "${D1_DATABASE_NAME}",
+                "database_id": "${D1_DATABASE_ID}",
+                "remote": true,
+                "migrations_dir": "migrations"
+              }
+            ],
+            "r2_buckets": [
+              {
+                "binding": "BUCKET",
+                "bucket_name": "${R2_BUCKET_NAME}"
+              }
+            ],
+            "workers_dev": true,
+            "vars": {
+              "WORKER_URL": "${WORKER_URL}"
+            }
+          }
+          EOF
+        env:
+          WORKER_NAME: ${{ vars.WORKER_NAME || 'forumforge' }}
+          D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          WORKER_URL: ${{ vars.WORKER_URL || 'http://localhost:8787' }}
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: deploy --config wrangler.ci.jsonc
+          secrets: |
+            JWT_SECRET
+            ADMIN_EMAIL
+            ADMIN_USERNAME
+            ADMIN_PASSWORD
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+
+      - name: Upload optional secrets
+        run: |
+          set -euo pipefail
+
+          put_secret() {
+            local key="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              printf "%s" "$value" | npx wrangler secret put "$key" --config wrangler.ci.jsonc
+            fi
+          }
+
+          put_secret BASE_URL "$BASE_URL"
+          put_secret ADMIN_EMAIL "$ADMIN_EMAIL"
+          put_secret ADMIN_USERNAME "$ADMIN_USERNAME"
+          put_secret ADMIN_PASSWORD "$ADMIN_PASSWORD"
+          put_secret SMTP_HOST "$SMTP_HOST"
+          put_secret SMTP_PORT "$SMTP_PORT"
+          put_secret SMTP_USER "$SMTP_USER"
+          put_secret SMTP_PASS "$SMTP_PASS"
+          put_secret SMTP_FROM "$SMTP_FROM"
+          put_secret SMTP_FROM_NAME "$SMTP_FROM_NAME"
+          put_secret TURNSTILE_SITE_KEY "$TURNSTILE_SITE_KEY"
+          put_secret TURNSTILE_SECRET_KEY "$TURNSTILE_SECRET_KEY"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          BASE_URL: ${{ secrets.BASE_URL }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_FROM_NAME: ${{ secrets.SMTP_FROM_NAME }}
+          TURNSTILE_SITE_KEY: ${{ secrets.TURNSTILE_SITE_KEY }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}

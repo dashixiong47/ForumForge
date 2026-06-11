@@ -1,0 +1,1 @@
+ALTER TABLE categories ADD COLUMN admin_only INTEGER DEFAULT 0;

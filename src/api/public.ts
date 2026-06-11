@@ -1,0 +1,71 @@
+import type { DBSetting } from '../db/types';
+import { FALLBACK_LOCALE } from '../core/locale';
+import { isLocalRequest } from '../core/env';
+import type { ApiContext } from './types';
+
+export async function handlePublicApi(ctx: ApiContext): Promise<Response | null> {
+	const {
+		url,
+		method,
+		env,
+		db,
+		jsonResponse,
+		handleError,
+		requestLocale,
+		normalizeLocale,
+		getEnabledLanguages,
+		getSystemTranslations,
+		loadLocalizedMaps,
+	} = ctx;
+
+	if (url.pathname === '/api/config' && method === 'GET') {
+		try {
+			const [setting, localeSetting, siteNameSetting, userCount, languages] = await Promise.all([
+				db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first<DBSetting>(),
+				db.prepare("SELECT value FROM settings WHERE key = 'default_locale'").first<DBSetting>(),
+				db.prepare("SELECT value FROM settings WHERE key = 'site_name'").first<DBSetting>(),
+				db.prepare('SELECT COUNT(*) as count FROM users').first('count'),
+				getEnabledLanguages()
+			]);
+
+			const dbEnabled = setting ? setting.value === '1' : false;
+			const siteKey = (env as any).TURNSTILE_SITE_KEY || '';
+			const secretKey = (env as any).TURNSTILE_SECRET_KEY || '';
+			const turnstileFullyConfigured = !!(dbEnabled && siteKey && secretKey && !isLocalRequest(url));
+			const locale = normalizeLocale(url.searchParams.get('locale')) || requestLocale();
+			const localized = await loadLocalizedMaps(['settings']);
+			const siteLocalized = localized.get('settings') || {};
+
+			return jsonResponse({
+				site_name: siteLocalized.site_name?.[locale] || siteLocalized.site_name?.['en-US'] || siteLocalized.site_name?.['zh-CN'] || siteNameSetting?.value || 'ForumForge',
+				site_tagline: siteLocalized.site_tagline?.[locale] || siteLocalized.site_tagline?.['en-US'] || siteLocalized.site_tagline?.['zh-CN'] || 'Dense media discussion feed',
+				default_locale: localeSetting?.value || locale || FALLBACK_LOCALE,
+				supported_locales: languages.map((language: any) => language.code),
+				languages,
+				turnstile_enabled: turnstileFullyConfigured,
+				turnstile_site_key: siteKey,
+				user_count: userCount || 0,
+				jwt_secret_configured: !!(env as any).JWT_SECRET && String((env as any).JWT_SECRET).length >= 32
+			});
+		} catch (e) {
+			return handleError(e);
+		}
+	}
+
+	if (url.pathname === '/api/i18n' && method === 'GET') {
+		try {
+			const requested = normalizeLocale(url.searchParams.get('locale')) || requestLocale();
+			const languages = await getEnabledLanguages();
+			const languageCodes = new Set(languages.map((language: any) => String(language.code)));
+			const locale = languageCodes.has(requested)
+				? requested
+				: (languageCodes.has(FALLBACK_LOCALE) ? FALLBACK_LOCALE : String((languages[0] as any)?.code || FALLBACK_LOCALE));
+			const messages = await getSystemTranslations(locale);
+			return jsonResponse({ locale, languages, messages });
+		} catch (e) {
+			return handleError(e);
+		}
+	}
+
+	return null;
+}
