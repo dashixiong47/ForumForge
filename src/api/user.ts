@@ -91,6 +91,7 @@ export async function handleUserApi(ctx: UserApiContext): Promise<Response | nul
 
 			await db.prepare('UPDATE users SET username = ?, avatar_url = ?, email_notifications = ?, show_public_posts = ? WHERE id = ?')
 				.bind(newUsername, newAvatarUrl, newEmailNotif, newShowPublicPosts, userId).run();
+			executionCtx.waitUntil(env.CACHE.delete(`user:${userId}`).catch(() => {}));
 
 			const user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first<DBUser>();
 			if (!user) return jsonResponse({ error: 'User not found' }, 404);

@@ -6,7 +6,9 @@ export type AdminI18nApiContext = {
 	request: Request;
 	url: URL;
 	method: string;
+	env: Env;
 	db: D1Database;
+	executionCtx: ExecutionContext;
 	jsonResponse: JsonResponse;
 	handleError: (e: any) => Response;
 	apiAdminUser: UserPayload | null;
@@ -20,7 +22,9 @@ export async function handleAdminI18nApi(ctx: AdminI18nApiContext): Promise<Resp
 		request,
 		url,
 		method,
+		env,
 		db,
+		executionCtx,
 		jsonResponse,
 		handleError,
 		apiAdminUser,
@@ -28,6 +32,14 @@ export async function handleAdminI18nApi(ctx: AdminI18nApiContext): Promise<Resp
 		normalizeLocale,
 		normalizeTranslationKey,
 	} = ctx;
+
+	const invalidateI18nKv = () => {
+		const kv = env.CACHE;
+		executionCtx.waitUntil((async () => {
+			const list = await kv.list({ prefix: 'i18n:system:' });
+			await Promise.all([kv.delete('i18n:languages'), ...list.keys.map((k) => kv.delete(k.name))]);
+		})().catch(() => {}));
+	};
 		if (url.pathname === '/api/admin/i18n' && method === 'GET') {
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
@@ -80,6 +92,7 @@ export async function handleAdminI18nApi(ctx: AdminI18nApiContext): Promise<Resp
 				const count = await db.prepare('SELECT COUNT(*) as count FROM languages WHERE enabled = 1').first<DBCount>();
 				if ((count?.count || 0) <= 1) return jsonResponse({ error: 'At least one language is required' }, 400);
 				await db.prepare('UPDATE languages SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE code = ?').bind(code).run();
+				invalidateI18nKv();
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -108,7 +121,10 @@ export async function handleAdminI18nApi(ctx: AdminI18nApiContext): Promise<Resp
 					if (!key || !locale || scope.length > 40) continue;
 					batch.push(stmt.bind(scope, key, locale, String(entry.value || '')));
 				}
-				if (batch.length) await db.batch(batch);
+				if (batch.length) {
+					await db.batch(batch);
+					invalidateI18nKv();
+				}
 				return jsonResponse({ success: true, count: batch.length });
 			} catch (e) {
 				return handleError(e);
@@ -124,6 +140,7 @@ export async function handleAdminI18nApi(ctx: AdminI18nApiContext): Promise<Resp
 				const key = normalizeTranslationKey(decodeURIComponent(parts[6] || ''));
 				if (!key) return jsonResponse({ error: 'Invalid key' }, 400);
 				await db.prepare('DELETE FROM translations WHERE scope = ? AND key = ?').bind(scope, key).run();
+				invalidateI18nKv();
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);

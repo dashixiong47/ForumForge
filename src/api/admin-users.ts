@@ -119,6 +119,7 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 			}
 
 			await security.logAudit(userPayload.id, 'ADMIN_UPDATE_USER', 'user', id, { username, email, avatar_url, role, verified, passwordChanged: !!password }, request);
+			executionCtx.waitUntil(env.CACHE.delete(`user:${id}`).catch(() => {}));
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -354,6 +355,7 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 			const userToDelete = await db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first<{ email: string; username: string }>();
 			await db.prepare('DELETE FROM users WHERE id = ?').bind(id).run();
 			await security.logAudit(userPayload.id, 'ADMIN_DELETE_USER', 'user', String(id), {}, request);
+			executionCtx.waitUntil(env.CACHE.delete(`user:${id}`).catch(() => {}));
 
 			if (userToDelete) {
 				const setting = await db.prepare("SELECT value FROM settings WHERE key = 'notify_on_user_delete'").first<DBSetting>();

@@ -41,6 +41,10 @@ import { CATEGORY_ICONS } from './assets/category-icons';
 import {
 	kvDeleteSettings, kvDeleteCategories, kvGetCategories, kvSetCategories,
 	kvGetAllSettings, kvSetAllSettings, kvCheckRateLimit,
+	kvGetTags, kvSetTags, kvDeleteTags,
+	kvGetUser, kvSetUser,
+	kvGetLanguages, kvSetLanguages, kvGetSystemTranslations, kvSetSystemTranslations, kvDeleteI18n,
+	kvIncrementViewCount, kvDrainViewCounts,
 } from './core/kv';
 
 const WORLD_MAP_R2_KEY = 'static/world.json';
@@ -359,6 +363,9 @@ export default {
 		};
 
 		const loadAccessUser = async (payload: UserPayload): Promise<UserPayload> => {
+			const cached = await kvGetUser<UserPayload>(kv, payload.id).catch(() => null);
+			if (cached) return cached;
+
 			const row = await db.prepare('SELECT id, email, role, verified, points, experience, level FROM users WHERE id = ?').bind(payload.id).first<DBUser>();
 			if (!row) throw new Error('Unauthorized');
 			const role = normalizeRole(row.role);
@@ -367,7 +374,7 @@ export default {
 				const roleRow = await db.prepare('SELECT permissions FROM role_permissions WHERE role = ?').bind(role).first<{ permissions: string }>();
 				if (roleRow) permissions = normalizePermissions(roleRow.permissions);
 			}
-			return {
+			const result: UserPayload = {
 				id: Number(row.id),
 				email: String(row.email || payload.email),
 				role,
@@ -377,6 +384,8 @@ export default {
 				experience: Number((row as any).experience || 0),
 				level: Number((row as any).level || 1),
 			};
+			ctx.waitUntil(kvSetUser(kv, payload.id, result).catch(() => {}));
+			return result;
 		};
 
 		const requireVerifiedUser = async (payload: UserPayload): Promise<UserPayload> => {
@@ -726,18 +735,22 @@ export default {
 			const locale = requestLocale();
 			const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
 			return cachedRead(`site-tags:${locale}`, async () => {
-			const { results } = await db.prepare(
-				`SELECT tags.id,
-				        COALESCE(name_t.value, name_f.value, tags.name) AS name,
-				        COUNT(post_tags.post_id) as post_count
-				 FROM tags
-				 LEFT JOIN post_tags ON post_tags.tag_id = tags.id
-				 LEFT JOIN translations name_t ON name_t.scope = 'tag:' || tags.id AND name_t.key = 'name' AND name_t.locale = ?
-				 LEFT JOIN translations name_f ON name_f.scope = 'tag:' || tags.id AND name_f.key = 'name' AND name_f.locale = ?
-				 GROUP BY tags.id
-				 ORDER BY name ASC`
-			).bind(locale, fallback).all();
-			return (results || []) as unknown as SiteTag[];
+				const kvHit = await kvGetTags<SiteTag[]>(kv, locale).catch(() => null);
+				if (kvHit) return kvHit;
+				const { results } = await db.prepare(
+					`SELECT tags.id,
+					        COALESCE(name_t.value, name_f.value, tags.name) AS name,
+					        COUNT(post_tags.post_id) as post_count
+					 FROM tags
+					 LEFT JOIN post_tags ON post_tags.tag_id = tags.id
+					 LEFT JOIN translations name_t ON name_t.scope = 'tag:' || tags.id AND name_t.key = 'name' AND name_t.locale = ?
+					 LEFT JOIN translations name_f ON name_f.scope = 'tag:' || tags.id AND name_f.key = 'name' AND name_f.locale = ?
+					 GROUP BY tags.id
+					 ORDER BY name ASC`
+				).bind(locale, fallback).all();
+				const data = (results || []) as unknown as SiteTag[];
+				ctx.waitUntil(kvSetTags(kv, locale, data).catch(() => {}));
+				return data;
 			});
 		};
 
@@ -866,12 +879,12 @@ tick();setInterval(tick,1000);
 			!url.pathname.includes('.');
 
 		const cleanupVisitEvents = async () => {
-			const [daysRow, maxRowsRow] = await Promise.all([
-				db.prepare("SELECT value FROM settings WHERE key = 'visit_log_retention_days'").first<DBSetting>(),
-				db.prepare("SELECT value FROM settings WHERE key = 'visit_log_max_rows'").first<DBSetting>(),
+			const [daysVal, maxRowsVal] = await Promise.all([
+				getSetting('visit_log_retention_days'),
+				getSetting('visit_log_max_rows'),
 			]);
-			const days = Math.max(0, Math.min(3650, Math.floor(Number(daysRow?.value || 90) || 0)));
-			const maxRows = Math.max(0, Math.min(10000000, Math.floor(Number(maxRowsRow?.value || 100000) || 0)));
+			const days = Math.max(0, Math.min(3650, Math.floor(Number(daysVal || 90) || 0)));
+			const maxRows = Math.max(0, Math.min(10000000, Math.floor(Number(maxRowsVal || 100000) || 0)));
 			if (days > 0) {
 				await db.prepare("DELETE FROM visit_events WHERE created_at < datetime('now', ?)").bind(`-${days} days`).run();
 			}
@@ -921,32 +934,37 @@ tick();setInterval(tick,1000);
 
 		const getEnabledLanguages = async () => {
 			return cachedRead('languages:enabled', async () => {
-			const { results } = await db.prepare(
-				'SELECT code, name, native_name, enabled, sort_order FROM languages WHERE enabled = 1 ORDER BY sort_order ASC, code ASC'
-			).all();
-			return results || [];
+				const kvHit = await kvGetLanguages<any[]>(kv).catch(() => null);
+				if (kvHit) return kvHit;
+				const { results } = await db.prepare(
+					'SELECT code, name, native_name, enabled, sort_order FROM languages WHERE enabled = 1 ORDER BY sort_order ASC, code ASC'
+				).all();
+				const data = results || [];
+				ctx.waitUntil(kvSetLanguages(kv, data).catch(() => {}));
+				return data;
 			});
 		};
 
 		const getSystemTranslations = async (locale: string) => {
 			return cachedRead(`i18n:system:${locale}`, async () => {
-			const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
-			const { results } = await db.prepare(
-				`SELECT key,
-				        COALESCE(
-				          MAX(CASE WHEN locale = ? THEN NULLIF(value, '') END),
-				          MAX(CASE WHEN locale = ? THEN NULLIF(value, '') END),
-				          key
-				        ) AS value
-				   FROM translations
-				  WHERE scope = 'system' AND locale IN (?, ?)
-				  GROUP BY key`
-			).bind(locale, fallback, locale, fallback).all();
-			const map: Record<string, string> = {};
-			for (const row of (results || []) as any[]) {
-				map[String(row.key)] = String(row.value || row.key);
-			}
-			return map;
+				const kvHit = await kvGetSystemTranslations<Record<string, string>>(kv, locale).catch(() => null);
+				if (kvHit) return kvHit;
+				const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
+				const { results } = await db.prepare(
+					`SELECT key,
+					        COALESCE(
+					          MAX(CASE WHEN locale = ? THEN NULLIF(value, '') END),
+					          MAX(CASE WHEN locale = ? THEN NULLIF(value, '') END),
+					          key
+					        ) AS value
+					   FROM translations
+					  WHERE scope = 'system' AND locale IN (?, ?)
+					  GROUP BY key`
+				).bind(locale, fallback, locale, fallback).all();
+				const map: Record<string, string> = {};
+				for (const row of (results || []) as any[]) map[String(row.key)] = String(row.value || row.key);
+				ctx.waitUntil(kvSetSystemTranslations(kv, locale, map).catch(() => {}));
+				return map;
 			});
 		};
 
@@ -1015,15 +1033,17 @@ tick();setInterval(tick,1000);
 
 		const invalidatePublicContent = (reason = 'content') => {
 			readCache.clear();
-			_settingsMap = null; // reset per-request settings cache
+			_settingsMap = null;
 			const isSettingsChange = reason.startsWith('settings');
-			const isCategoryChange = reason.startsWith('category') || reason.startsWith('tag');
+			const isCategoryChange = reason.startsWith('category');
+			const isTagChange = reason.startsWith('tag');
 			ctx.waitUntil((async () => {
 				const locales = await getPublicCacheLocales();
 				await Promise.all([
 					deleteHomeCacheVariants(url.origin, locales, [url.search || '']),
 					isSettingsChange ? kvDeleteSettings(kv).catch(() => {}) : Promise.resolve(),
 					isCategoryChange ? kvDeleteCategories(kv).catch(() => {}) : Promise.resolve(),
+					isTagChange ? kvDeleteTags(kv).catch(() => {}) : Promise.resolve(),
 				]);
 			})().catch((err) => console.warn('Failed to invalidate public content cache', reason, err)));
 		};
@@ -1161,7 +1181,9 @@ tick();setInterval(tick,1000);
 			request,
 			url,
 			method,
+			env,
 			db,
+			executionCtx: ctx,
 			jsonResponse,
 			handleError,
 			apiAdminUser,
@@ -1838,5 +1860,24 @@ tick();setInterval(tick,1000);
 		}
 
 		return new Response('Not Found', { status: 404 });
-	}
+	},
+
+	// Cron Trigger: flush accumulated KV view counts to D1 in batch every 5 minutes.
+	// Eliminates per-view D1 writes; trades exact real-time counts for bulk efficiency.
+	async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+		ctx.waitUntil((async () => {
+			const counts = await kvDrainViewCounts(env.CACHE);
+			if (!counts.size) return;
+			const db = env.DB;
+			const stmt = db.prepare('UPDATE posts SET view_count = COALESCE(view_count, 0) + ? WHERE id = ?');
+			const batches: D1PreparedStatement[] = [];
+			for (const [postId, count] of counts) {
+				if (count > 0) batches.push(stmt.bind(count, Number(postId)));
+			}
+			// D1 batch allows max 100 statements; chunk if needed
+			for (let i = 0; i < batches.length; i += 100) {
+				await db.batch(batches.slice(i, i + 100));
+			}
+		})().catch((err) => console.error('View count flush failed', err)));
+	},
 };

@@ -196,7 +196,18 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			if (!canViewPostByLevel(viewer, post)) return jsonResponse({ error: 'Level required to view this post' }, 403);
 
 			try {
-				await db.prepare('UPDATE posts SET view_count = COALESCE(view_count, 0) + 1 WHERE id = ?').bind(postId).run();
+				const kv = env.CACHE;
+				if (kv) {
+					executionCtx.waitUntil(
+						(async () => {
+							const key = `views:${postId}`;
+							const cur = parseInt((await kv.get(key)) ?? '0');
+							await kv.put(key, String(cur + 1), { expirationTtl: 86400 });
+						})().catch(() => {}),
+					);
+				} else {
+					await db.prepare('UPDATE posts SET view_count = COALESCE(view_count, 0) + 1 WHERE id = ?').bind(postId).run();
+				}
 				post.view_count = Number(post.view_count || 0) + 1;
 			} catch {}
 

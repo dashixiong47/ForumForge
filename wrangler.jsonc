@@ -43,6 +43,9 @@
 	 * Enable default *.workers.dev domain
 	 */
 	"workers_dev": true,
+	"triggers": {
+		"crons": ["*/5 * * * *"]
+	},
 	"send_email": [
 		{
 			"name": "EMAIL",
