@@ -147,10 +147,26 @@ function sanitizeStyle(value: string): string {
 	return rules.join(';');
 }
 
+function sanitizeImageStyle(value: string): string {
+	const rules: string[] = [];
+	for (const part of value.split(';')) {
+		const [nameRaw, ...rest] = part.split(':');
+		const name = String(nameRaw || '').trim().toLowerCase();
+		const cssValue = rest.join(':').trim().toLowerCase();
+		if (!cssValue) continue;
+		if ((name === 'width' || name === 'height' || name === 'max-width' || name === 'max-height')
+			&& (/^\d{1,4}px$/.test(cssValue) || (name === 'width' && cssValue === 'auto') || (name === 'max-width' && cssValue === '100%'))) {
+			rules.push(`${name}:${cssValue}`);
+		}
+	}
+	return rules.join(';');
+}
+
 function sanitizeAttrs(tag: string, attrs: string, options?: MarkdownRenderOptions): string {
 	const out: string[] = [];
 	const attrRe = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
 	let match: RegExpExecArray | null;
+	let imgSrc = '';
 	while ((match = attrRe.exec(attrs || ''))) {
 		const name = match[1].toLowerCase();
 		const value = String(match[3] ?? match[4] ?? match[5] ?? '');
@@ -166,6 +182,12 @@ function sanitizeAttrs(tag: string, attrs: string, options?: MarkdownRenderOptio
 		}
 		if (name === 'src' && ['img', 'video', 'source'].includes(tag) && isSafeUrl(value)) {
 			out.push(`src="${attr(value)}"`);
+			if (tag === 'img') imgSrc = value;
+			continue;
+		}
+		if (name === 'style' && tag === 'img') {
+			const style = sanitizeImageStyle(value);
+			if (style) out.push(`style="${attr(style)}"`);
 			continue;
 		}
 		if (name === 'src' && tag === 'iframe' && isSafeEmbedUrl(value, options)) {
@@ -217,7 +239,10 @@ function sanitizeAttrs(tag: string, attrs: string, options?: MarkdownRenderOptio
 		}
 	}
 	if (tag === 'a') out.push('rel="noopener noreferrer"', 'target="_blank"');
-	if (tag === 'img') out.push('loading="lazy"');
+	if (tag === 'img') {
+		out.push('class="md-image"', 'loading="lazy"');
+		if (imgSrc) out.push(`data-lightbox="${attr(imgSrc)}"`, 'data-lightbox-type="image"');
+	}
 	return out.length ? ` ${Array.from(new Set(out)).join(' ')}` : '';
 }
 
@@ -252,17 +277,70 @@ function expandVideoEmbeds(source: string, options?: MarkdownRenderOptions): str
 	return source.replace(/^@\[(?:video|视频)\]\(([^)\s]+)\)\s*$/gmi, (full, url) => videoEmbedHtml(url, options) || escapeHtml(full));
 }
 
+function clampSize(value: string, min: number, max: number): number | undefined {
+	const num = Math.round(Number(value || 0));
+	if (!Number.isFinite(num) || num <= 0) return undefined;
+	return Math.max(min, Math.min(max, num));
+}
+
+function parseAltSize(value: string): { alt: string; width?: number; height?: number } {
+	const raw = String(value || '');
+	const match = raw.match(/^(.*?)\|(\d{1,4})?x(\d{1,4})?$/);
+	if (!match || (!match[2] && !match[3])) return { alt: raw };
+	return {
+		alt: match[1],
+		width: clampSize(match[2] || '', 80, 1600),
+		height: clampSize(match[3] || '', 60, 1200),
+	};
+}
+
+function imageStyle(width?: number, height?: number): string {
+	const rules: string[] = [];
+	if (width) rules.push(`width:${width}px`);
+	else if (height) rules.push('width:auto');
+	if (height) rules.push(`height:${height}px`);
+	if (rules.length) rules.push('max-width:100%');
+	return rules.join(';');
+}
+
+function markdownImageHtml(altRaw: string, urlRaw: string, widthRaw?: string, heightRaw?: string, titleRaw?: string): string {
+	const url = String(urlRaw || '').trim();
+	if (!isSafeVideoUrl(url)) return escapeHtml(`![${altRaw}](${urlRaw || ''})`);
+	const parsed = parseAltSize(altRaw);
+	const width = clampSize(widthRaw || '', 80, 1600) || parsed.width;
+	const height = clampSize(heightRaw || '', 60, 1200) || parsed.height;
+	const style = imageStyle(width, height);
+	const title = String(titleRaw || '').trim();
+	return `<img class="md-image" src="${attr(url)}" alt="${attr(parsed.alt)}"${title ? ` title="${attr(title)}"` : ''}${style ? ` style="${attr(style)}"` : ''}>`;
+}
+
+function expandMarkdownImages(source: string): string {
+	return source.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+=(\d{0,4})x(\d{0,4}))?(?:\s+"([^"]*)")?\)/g, (_full, alt, url, width, height, title) =>
+		markdownImageHtml(alt, url, width, height, title)
+	);
+}
+
 function mediaType(url: string): 'image' | 'video' {
 	return /\.(mp4|webm|ogg|mov)(?:[?#].*)?$/i.test(url) ? 'video' : 'image';
 }
 
 export function extractMedia(content: string): Array<{ url: string; alt: string; type: 'image' | 'video' }> {
 	const media: Array<{ url: string; alt: string; type: 'image' | 'video' }> = [];
-	const imageRegex = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+	const seen = new Set<string>();
+	const push = (urlValue: string, alt = '') => {
+		const url = String(urlValue || '').trim();
+		if (!url || seen.has(url) || !isSafeVideoUrl(url)) return;
+		seen.add(url);
+		media.push({ url, alt, type: mediaType(url) });
+	};
+	const imageRegex = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+=\d{0,4}x\d{0,4})?(?:\s+"[^"]*")?\)/g;
 	let match: RegExpExecArray | null;
 	while ((match = imageRegex.exec(content || ''))) {
-		const url = match[2].trim();
-		media.push({ url, alt: match[1] || '', type: mediaType(url) });
+		push(match[2], match[1] || '');
+	}
+	const htmlMediaRegex = /<(img|video)\b[^>]*\b(?:src|poster)=["']([^"']+)["'][^>]*>/gi;
+	while ((match = htmlMediaRegex.exec(content || ''))) {
+		push(match[2], '');
 	}
 	return media;
 }
@@ -295,7 +373,7 @@ function inlineMarkdown(line: string): string {
 export function renderMarkdown(content: string, options?: MarkdownRenderOptions): string {
 	const source = String(content || '').trim();
 	if (!source) return '<p class="muted" data-i18n="common.emptyContent">暂无内容</p>';
-	const html = marked.parse(expandVideoEmbeds(source, options), {
+	const html = marked.parse(expandVideoEmbeds(expandMarkdownImages(source), options), {
 		async: false,
 		breaks: false,
 		gfm: true,

@@ -21,7 +21,7 @@ import {
 import { normalizePluginId } from './plugins/registry';
 import { renderSiteRoute } from './pages/site-routes';
 import { renderAdminRoute } from './pages/admin-routes';
-import { renderAuthPage, siteHtmlResponse } from './site/ssr';
+import { siteHtmlResponse, type SiteBrand } from './site/ssr';
 import { handlePublicApi } from './api/public';
 import { handlePluginApi } from './api/plugins';
 import { handleAdminSettingsApi } from './api/admin-settings';
@@ -298,22 +298,6 @@ export default {
 			if (object.httpEtag) headers.set('etag', object.httpEtag);
 			headers.set('Cache-Control', 'public, max-age=3600');
 			return new Response(method === 'HEAD' ? null : object.body, { headers });
-		}
-
-		if ((method === 'GET' || method === 'HEAD') && (url.pathname === '/login' || url.pathname === '/register' || url.pathname === '/forgot' || url.pathname === '/reset')) {
-			const providers = url.pathname === '/login' || url.pathname === '/register'
-				? await loadOAuthPublicProviders(db, env, getBaseUrl).catch(() => [])
-				: [];
-			const html = url.pathname === '/login'
-				? renderAuthPage('login', '', providers)
-				: url.pathname === '/register'
-					? renderAuthPage('register', '', providers)
-					: url.pathname === '/forgot'
-						? renderAuthPage('forgot')
-						: renderAuthPage('reset', url.searchParams.get('token') || '');
-			const response = siteHtmlResponse(html);
-			response.headers.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
-			return response;
 		}
 
 		// perform initialization before security setup
@@ -752,6 +736,17 @@ export default {
 			});
 		};
 
+		const getSiteBrand = async (): Promise<SiteBrand> => {
+			const [siteName, siteIconUrl] = await Promise.all([
+				getSetting('site_name'),
+				getSetting('site_icon_url'),
+			]);
+			return {
+				siteName: siteName || 'ForumForge',
+				siteIconUrl: siteIconUrl || '',
+			};
+		};
+
 		const renderMaintenancePage = (settings: Record<string, string>) => {
 			const escapePageHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
 				'&': '&amp;',
@@ -1086,6 +1081,7 @@ tick();setInterval(tick,1000);
 			settingNumber,
 			requestLocale,
 			getEnabledLanguages,
+			getSiteBrand,
 			getOAuthProviders: () => loadOAuthPublicProviders(db, env, getBaseUrl),
 			attachTagsToPosts,
 			applyLocalizedCategoriesToPosts,

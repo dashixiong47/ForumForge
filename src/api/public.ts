@@ -1,10 +1,13 @@
 import type { DBSetting } from '../db/types';
 import { FALLBACK_LOCALE } from '../core/locale';
 import { isLocalRequest } from '../core/env';
+import { DEFAULT_VIDEO_EMBED_DOMAINS } from '../site/markdown';
+import { renderPostArticleHtml } from '../site/post-content';
 import type { ApiContext } from './types';
 
 export async function handlePublicApi(ctx: ApiContext): Promise<Response | null> {
 	const {
+		request,
 		url,
 		method,
 		env,
@@ -17,6 +20,20 @@ export async function handlePublicApi(ctx: ApiContext): Promise<Response | null>
 		getSystemTranslations,
 		loadLocalizedMaps,
 	} = ctx;
+
+	if (url.pathname === '/api/markdown/preview' && method === 'POST') {
+		try {
+			const body = await request.json().catch(() => ({})) as { content?: unknown };
+			const setting = await db.prepare("SELECT value FROM settings WHERE key = 'video_embed_domains'").first<DBSetting>().catch(() => null);
+			return jsonResponse({
+				html: renderPostArticleHtml(String(body.content || '').slice(0, 3000), {
+					videoEmbedDomains: setting?.value || DEFAULT_VIDEO_EMBED_DOMAINS,
+				}),
+			});
+		} catch (e) {
+			return handleError(e);
+		}
+	}
 
 	if (url.pathname === '/api/config' && method === 'GET') {
 		try {

@@ -13,6 +13,7 @@ import {
 	renderPublicUserPage,
 	renderSettingsPageSite,
 	siteHtmlResponse,
+	type SiteBrand,
 	type SiteCategory,
 	type SiteLanguage,
 	type SitePost,
@@ -33,6 +34,7 @@ export type SiteRouteContext = {
 	settingNumber: (key: string, fallback: number) => Promise<number>;
 	requestLocale: () => string;
 	getEnabledLanguages: () => Promise<SiteLanguage[]>;
+	getSiteBrand: () => Promise<SiteBrand>;
 	getOAuthProviders?: () => Promise<Array<{ id: string; label: string }>>;
 	attachTagsToPosts: <T extends { id: number | string }>(posts: T[]) => Promise<Array<T & { tags: Array<{ id: number; name: string }> }>>;
 	applyLocalizedCategoriesToPosts: <T extends { category_id?: number | string | null; category_name?: string | null }>(posts: T[], categories: SiteCategory[]) => T[];
@@ -54,6 +56,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 		settingNumber,
 		requestLocale,
 		getEnabledLanguages,
+		getSiteBrand,
 		getOAuthProviders,
 		attachTagsToPosts,
 		applyLocalizedCategoriesToPosts,
@@ -72,13 +75,14 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				});
 			}
 
-			if (url.pathname === '/login') return siteHtmlResponse(renderAuthPage('login', '', getOAuthProviders ? await getOAuthProviders() : []));
-			if (url.pathname === '/register') return siteHtmlResponse(renderAuthPage('register', '', getOAuthProviders ? await getOAuthProviders() : []));
-			if (url.pathname === '/forgot') return siteHtmlResponse(renderAuthPage('forgot'));
-			if (url.pathname === '/reset') return siteHtmlResponse(renderAuthPage('reset', url.searchParams.get('token') || ''));
+			if (url.pathname === '/login') return siteHtmlResponse(renderAuthPage('login', '', getOAuthProviders ? await getOAuthProviders() : [], await getSiteBrand()));
+			if (url.pathname === '/register') return siteHtmlResponse(renderAuthPage('register', '', getOAuthProviders ? await getOAuthProviders() : [], await getSiteBrand()));
+			if (url.pathname === '/forgot') return siteHtmlResponse(renderAuthPage('forgot', '', [], await getSiteBrand()));
+			if (url.pathname === '/reset') return siteHtmlResponse(renderAuthPage('reset', url.searchParams.get('token') || '', [], await getSiteBrand()));
 
 			const user = await getCurrentSiteUser();
 			const categories = await getSiteCategories(user);
+			const brand = await getSiteBrand();
 			const getLevelSettings = async () => normalizeLevelSettings({
 				maxLevel: await settingNumber(LEVEL_SETTING_KEYS.maxLevel, DEFAULT_LEVEL_SETTINGS.maxLevel),
 				baseExperience: await settingNumber(LEVEL_SETTING_KEYS.baseExperience, DEFAULT_LEVEL_SETTINGS.baseExperience),
@@ -110,7 +114,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
 				const oauthCount = await db.prepare('SELECT COUNT(*) AS count FROM oauth_accounts WHERE user_id = ?').bind(user.id).first<DBCount>().catch(() => ({ count: 0 }) as DBCount);
 				user.oauth_count = Number(oauthCount?.count || 0);
-				return siteHtmlResponse(renderSettingsPageSite({ user, categories, levelSettings: await getLevelSettings() }));
+				return siteHtmlResponse(renderSettingsPageSite({ user, categories, brand, levelSettings: await getLevelSettings() }));
 			}
 
 			if (url.pathname === '/me') {
@@ -189,6 +193,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				return siteHtmlResponse(renderMyContentPage({
 					user,
 					env,
+					brand,
 					categories,
 					posts: posts as unknown as SitePost[],
 					drafts: drafts as unknown as SitePost[],
@@ -213,6 +218,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				return siteHtmlResponse(renderNewPostPage({
 					user,
 					env,
+					brand,
 					categories,
 					tags,
 					languages: await getEnabledLanguages(),
@@ -225,13 +231,13 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			const userMatch = url.pathname.match(/^\/users\/([0-9A-Za-z]+)$/) || url.pathname.match(/^\/u\/([0-9A-Za-z]+)$/);
 			if (userMatch) {
 				const profileId = decodePublicId(userMatch[1], env);
-				if (!profileId) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>用户不存在</h1>'), 404);
+				if (!profileId) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>用户不存在</h1>'), 404);
 				const profile = await db.prepare(
 					`SELECT id, email, username, role, verified, avatar_url, email_notifications, show_public_posts, points, experience, level, last_checkin_date, created_at
 					 FROM users
 					 WHERE id = ?`
 				).bind(profileId).first<SiteUser>();
-				if (!profile) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>用户不存在</h1>'), 404);
+				if (!profile) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>用户不存在</h1>'), 404);
 				const pageSize = 12;
 				const page = Math.max(1, Math.min(999, Number(url.searchParams.get('page') || 1) || 1));
 				const showPosts = Number(profile.show_public_posts ?? 1) !== 0 || Number(user?.id || 0) === Number(profile.id) || user?.role === 'admin';
@@ -278,6 +284,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					profile,
 					viewer: user,
 					env,
+					brand,
 					categories,
 					posts: posts as unknown as SitePost[],
 					showPosts,
@@ -292,16 +299,16 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			if (editMatch) {
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
 				const postId = decodePublicId(editMatch[1], env);
-				if (!postId) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
+				if (!postId) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				const post = await db.prepare(
 					`SELECT posts.*, categories.name as category_name
 					 FROM posts
 					 LEFT JOIN categories ON posts.category_id = categories.id
 					 WHERE posts.id = ?`
 				).bind(postId).first<SitePost>();
-				if (!post) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
+				if (!post) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				if (!canAdmin(user as any, 'posts') && Number(post.author_id) !== Number(user.id)) {
-					return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>无权限编辑</h1>'), 403);
+					return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>无权限编辑</h1>'), 403);
 				}
 				const [postWithTags] = await attachTagsToPosts(applyLocalizedCategoriesToPosts([post as any], categories));
 				const translationsRes = await db.prepare('SELECT locale, title, content, updated_at FROM post_translations WHERE post_id = ?').bind(postId).all();
@@ -310,6 +317,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				return siteHtmlResponse(renderNewPostPage({
 					user,
 					env,
+					brand,
 					categories,
 					tags,
 					post: postWithTags as unknown as SitePost,
@@ -324,7 +332,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			const queryPostId = url.pathname === '/post' ? url.searchParams.get('id') : '';
 			if (postMatch || queryPostId) {
 				const postId = decodePublicId(postMatch ? postMatch[1] : queryPostId, env);
-				if (!postId) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
+				if (!postId) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				const localizePost = await canUsePostI18n();
 				const post = await db.prepare(
 					`SELECT
@@ -345,17 +353,17 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					 ${localizedPostJoin(localizePost)}
 					 WHERE posts.id = ?`
 				).bind(...localizedPostParams(localizePost), postId).first<SitePost>();
-				if (!post) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
+				if (!post) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				const postStatus = String((post as any).status || 'approved');
 				const canPreviewPending = user ? (() => {
 					const accessUser = user as unknown as UserPayload;
 					return Number((post as any).author_id) === Number(user.id) || canAdmin(accessUser, 'posts') || canAdmin(accessUser, 'moderation');
 				})() : false;
 				if (postStatus !== 'approved' && !canPreviewPending) {
-					return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
+					return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				}
 				if (Number((post as any).admin_only || 0) !== 0 && !(user && (canAdmin(user as any, 'posts') || canAdmin(user as any, 'categories')))) {
-					return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
+					return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				}
 				if (postStatus === 'approved') {
 					try {
@@ -374,6 +382,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				return siteHtmlResponse(renderPostPage({
 					user,
 					env,
+					brand,
 					categories,
 					post: postWithTags as unknown as SitePost,
 					comments: (comments.results || []) as any[],
@@ -444,6 +453,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				return siteHtmlResponse(renderHomePage({
 					user,
 					env,
+					brand,
 					categories,
 					allCategory,
 					posts: posts as unknown as SitePost[],
@@ -457,7 +467,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				}));
 			}
 
-			return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>页面不存在</h1>'), 404);
+			return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>页面不存在</h1>'), 404);
 }
 
 
