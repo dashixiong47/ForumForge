@@ -1084,6 +1084,8 @@ tick();setInterval(tick,1000);
 			getAllCategoryCopy,
 			clearAuthCookie,
 			settingNumber,
+			requestLocale,
+			getEnabledLanguages,
 			getOAuthProviders: () => loadOAuthPublicProviders(db, env, getBaseUrl),
 			attachTagsToPosts,
 			applyLocalizedCategoriesToPosts,

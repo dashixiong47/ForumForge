@@ -41,6 +41,7 @@ export interface SitePost {
 	status?: string;
 	rejection_reason?: string;
 	tags?: Array<{ id: number; name: string }>;
+	translations?: Record<string, { locale?: string; title?: string; content?: string; updated_at?: string }>;
 }
 
 export interface SiteCategory {
@@ -60,6 +61,14 @@ export interface SiteTag {
 	id: number;
 	name: string;
 	post_count?: number;
+}
+
+export interface SiteLanguage {
+	code: string;
+	name?: string;
+	native_name?: string;
+	enabled?: number;
+	sort_order?: number;
 }
 
 export interface SiteComment {

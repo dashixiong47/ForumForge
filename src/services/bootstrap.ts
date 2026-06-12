@@ -9,7 +9,7 @@ import { FORUMFORGE_ICON_DATA_URL, FORUMFORGE_ICON_FILENAME, FORUMFORGE_ICON_KEY
 import { CATEGORY_ICONS } from '../assets/category-icons';
 import { KV_BOOTSTRAP_KEY, KV_BOOTSTRAP_TTL } from '../core/kv';
 
-const BOOTSTRAP_VERSION = '2026-06-11.2';
+const BOOTSTRAP_VERSION = '2026-06-12.1';
 
 let bootstrapPromise: Promise<void> | null = null;
 let bootstrapReady = false;
@@ -863,6 +863,20 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 					`INSERT OR IGNORE INTO settings (key, value) VALUES ('${keys.experience}', '${DEFAULT_PROGRESS_REWARDS[source as ProgressSource].experience}');`
 				])
 			];
+			const postTranslationSchemaStmts = [
+				`CREATE TABLE IF NOT EXISTS post_translations (
+  post_id INTEGER NOT NULL,
+  locale TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (post_id, locale),
+  FOREIGN KEY (post_id) REFERENCES posts(id)
+);`,
+				`CREATE INDEX IF NOT EXISTS idx_post_translations_locale ON post_translations(locale);`,
+				`INSERT OR IGNORE INTO settings (key, value) VALUES ('posts_i18n_enabled', '1');`
+			];
 			const notificationSchemaStmts = [
 				`CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -962,7 +976,7 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 			}
 
 			if (!baseSchemaMissing) {
-				for (const stmt of [...profileAlterStmts, ...tagSchemaStmts, ...pluginSchemaStmts, ...i18nSchemaStmts, ...mediaSchemaStmts, ...progressSchemaStmts, ...notificationSchemaStmts, ...visitSchemaStmts, ...rolePermissionSchemaStmts, ...oauthSchemaStmts]) {
+				for (const stmt of [...profileAlterStmts, ...tagSchemaStmts, ...pluginSchemaStmts, ...i18nSchemaStmts, ...mediaSchemaStmts, ...progressSchemaStmts, ...postTranslationSchemaStmts, ...notificationSchemaStmts, ...visitSchemaStmts, ...rolePermissionSchemaStmts, ...oauthSchemaStmts]) {
 					try {
 						await db.prepare(stmt).run();
 					} catch (e) {
@@ -1063,6 +1077,7 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 				...i18nSchemaStmts,
 				...mediaSchemaStmts,
 				...progressSchemaStmts,
+				...postTranslationSchemaStmts,
 				...notificationSchemaStmts,
 				...visitSchemaStmts,
 				...rolePermissionSchemaStmts,

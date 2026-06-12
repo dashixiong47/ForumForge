@@ -13,6 +13,7 @@ import {
 	renderSettingsPageSite,
 	siteHtmlResponse,
 	type SiteCategory,
+	type SiteLanguage,
 	type SitePost,
 	type SiteTag,
 	type SiteUser,
@@ -29,6 +30,8 @@ export type SiteRouteContext = {
 	getAllCategoryCopy: (totalPosts?: number) => Promise<SiteCategory>;
 	clearAuthCookie: () => string;
 	settingNumber: (key: string, fallback: number) => Promise<number>;
+	requestLocale: () => string;
+	getEnabledLanguages: () => Promise<SiteLanguage[]>;
 	getOAuthProviders?: () => Promise<Array<{ id: string; label: string }>>;
 	attachTagsToPosts: <T extends { id: number | string }>(posts: T[]) => Promise<Array<T & { tags: Array<{ id: number; name: string }> }>>;
 	applyLocalizedCategoriesToPosts: <T extends { category_id?: number | string | null; category_name?: string | null }>(posts: T[], categories: SiteCategory[]) => T[];
@@ -46,6 +49,8 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 		getAllCategoryCopy,
 		clearAuthCookie,
 		settingNumber,
+		requestLocale,
+		getEnabledLanguages,
 		getOAuthProviders,
 		attachTagsToPosts,
 		applyLocalizedCategoriesToPosts,
@@ -76,6 +81,17 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				baseExperience: await settingNumber(LEVEL_SETTING_KEYS.baseExperience, DEFAULT_LEVEL_SETTINGS.baseExperience),
 				growth: await settingNumber(LEVEL_SETTING_KEYS.growth, DEFAULT_LEVEL_SETTINGS.growth),
 			});
+			const settingBool = async (key: string, fallback: boolean) => {
+				const row = await db.prepare('SELECT value FROM settings WHERE key = ?').bind(key).first<{ value?: string }>().catch(() => null);
+				return row?.value == null ? fallback : row.value !== '0';
+			};
+			const currentLocale = requestLocale();
+			const canUsePostI18n = async () => (await settingBool('posts_i18n_enabled', true)) || !!(user && canAdmin(user as any, 'posts'));
+			const localizedPostColumns = (enabled: boolean) => enabled
+				? `posts.*, COALESCE(NULLIF(pt.title, ''), posts.title) as title, COALESCE(NULLIF(pt.content, ''), posts.content) as content,`
+				: `posts.*,`;
+			const localizedPostJoin = (enabled: boolean) => enabled ? `LEFT JOIN post_translations pt ON pt.post_id = posts.id AND pt.locale = ?` : '';
+			const localizedPostParams = (enabled: boolean) => enabled ? [currentLocale] : [];
 
 			if (url.pathname === '/settings') {
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
@@ -96,45 +112,50 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const repliesPage = safePage('replies_page');
 				const levelPage = safePage('level_page');
 				const notificationsPage = safePage('notifications_page');
+				const localizePosts = await canUsePostI18n();
 				const [postsRes, postsCount, draftsRes, draftsCount, commentsRes, commentsCount, progressRes, progressCount, notificationsRes, notificationsCount] = await Promise.all([
 					db.prepare(
-						`SELECT posts.*, categories.name as category_name,
+						`SELECT ${localizedPostColumns(localizePosts)} categories.name as category_name,
 							(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
 						 FROM posts
 						 LEFT JOIN categories ON posts.category_id = categories.id
+						 ${localizedPostJoin(localizePosts)}
 						 WHERE posts.author_id = ?
 						   AND COALESCE(posts.status, 'approved') <> 'draft'
 						 ORDER BY posts.created_at DESC
 						 LIMIT ? OFFSET ?`
-					).bind(user.id, pageSize, (postsPage - 1) * pageSize).all(),
+					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (postsPage - 1) * pageSize).all(),
 					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') <> 'draft'").bind(user.id).first<DBCount>(),
 					db.prepare(
-						`SELECT posts.*, categories.name as category_name
+						`SELECT ${localizedPostColumns(localizePosts)} categories.name as category_name
 						 FROM posts
 						 LEFT JOIN categories ON posts.category_id = categories.id
+						 ${localizedPostJoin(localizePosts)}
 						 WHERE posts.author_id = ?
 						   AND COALESCE(posts.status, 'approved') = 'draft'
 						 ORDER BY posts.created_at DESC
 						 LIMIT ? OFFSET ?`
-					).bind(user.id, pageSize, (draftsPage - 1) * pageSize).all(),
+					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (draftsPage - 1) * pageSize).all(),
 					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') = 'draft'").bind(user.id).first<DBCount>(),
 					db.prepare(
-						`SELECT comments.*, posts.title as post_title
+						`SELECT comments.*, ${localizePosts ? "COALESCE(NULLIF(pt.title, ''), posts.title)" : 'posts.title'} as post_title
 						 FROM comments
 						 JOIN posts ON posts.id = comments.post_id
+						 ${localizedPostJoin(localizePosts)}
 						 WHERE comments.author_id = ?
 						 ORDER BY comments.created_at DESC
 						 LIMIT ? OFFSET ?`
-					).bind(user.id, pageSize, (repliesPage - 1) * pageSize).all(),
+					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (repliesPage - 1) * pageSize).all(),
 					db.prepare('SELECT COUNT(*) AS count FROM comments WHERE author_id = ?').bind(user.id).first<DBCount>(),
 					db.prepare(
-						`SELECT user_progress_logs.*, posts.title as post_title
+						`SELECT user_progress_logs.*, ${localizePosts ? "COALESCE(NULLIF(pt.title, ''), posts.title)" : 'posts.title'} as post_title
 						 FROM user_progress_logs
 						 LEFT JOIN posts ON posts.id = user_progress_logs.post_id
+						 ${localizedPostJoin(localizePosts)}
 						 WHERE user_progress_logs.user_id = ?
 						 ORDER BY user_progress_logs.created_at DESC
 						 LIMIT ? OFFSET ?`
-					).bind(user.id, pageSize, (levelPage - 1) * pageSize).all(),
+					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (levelPage - 1) * pageSize).all(),
 					db.prepare('SELECT COUNT(*) AS count FROM user_progress_logs WHERE user_id = ?').bind(user.id).first<DBCount>(),
 					db.prepare(
 						`SELECT id, type, title, body, post_id, comment_id, is_read, created_at
@@ -176,7 +197,15 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			if (url.pathname === '/new-post') {
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
 				const tags = await getSiteTags();
-				return siteHtmlResponse(renderNewPostPage({ user, env, categories, tags }));
+				return siteHtmlResponse(renderNewPostPage({
+					user,
+					env,
+					categories,
+					tags,
+					languages: await getEnabledLanguages(),
+					locale: currentLocale,
+					postI18nEnabled: await canUsePostI18n(),
+				}));
 			}
 
 			const userMatch = url.pathname.match(/^\/users\/([0-9A-Za-z]+)$/) || url.pathname.match(/^\/u\/([0-9A-Za-z]+)$/);
@@ -193,6 +222,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const page = Math.max(1, Math.min(999, Number(url.searchParams.get('page') || 1) || 1));
 				const showPosts = Number(profile.show_public_posts ?? 1) !== 0 || Number(user?.id || 0) === Number(profile.id) || user?.role === 'admin';
 				const includeAdminOnlyProfilePosts = user ? canAdmin(user as any, 'posts') || canAdmin(user as any, 'categories') : false;
+				const localizeProfilePosts = await canUsePostI18n();
 				const [postCount, commentCount, postsResult] = await Promise.all([
 					showPosts
 						? db.prepare(
@@ -207,7 +237,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					db.prepare("SELECT COUNT(*) AS count FROM comments WHERE author_id = ? AND COALESCE(status, 'approved') = 'approved'").bind(profile.id).first<DBCount>(),
 					showPosts
 						? db.prepare(
-							`SELECT posts.*,
+							`SELECT ${localizedPostColumns(localizeProfilePosts)}
 								users.username as author_name,
 								users.avatar_url as author_avatar,
 								users.role as author_role,
@@ -220,12 +250,13 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 							 FROM posts
 							 JOIN users ON posts.author_id = users.id
 							 LEFT JOIN categories ON posts.category_id = categories.id
+							 ${localizedPostJoin(localizeProfilePosts)}
 							 WHERE posts.author_id = ?
 							   AND COALESCE(posts.status, 'approved') = 'approved'
 							   AND (posts.category_id IS NULL OR (COALESCE(categories.enabled, 1) = 1 AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)))
 							 ORDER BY posts.created_at DESC
 							 LIMIT ? OFFSET ?`
-						).bind(profile.id, includeAdminOnlyProfilePosts ? 1 : 0, pageSize, (page - 1) * pageSize).all()
+						).bind(...localizedPostParams(localizeProfilePosts), profile.id, includeAdminOnlyProfilePosts ? 1 : 0, pageSize, (page - 1) * pageSize).all()
 						: Promise.resolve({ results: [] } as any),
 				]);
 				const posts = showPosts ? await attachTagsToPosts(applyLocalizedCategoriesToPosts((postsResult.results || []) as any[], categories)) : [];
@@ -259,8 +290,19 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>无权限编辑</h1>'), 403);
 				}
 				const [postWithTags] = await attachTagsToPosts(applyLocalizedCategoriesToPosts([post as any], categories));
+				const translationsRes = await db.prepare('SELECT locale, title, content, updated_at FROM post_translations WHERE post_id = ?').bind(postId).all();
+				(postWithTags as any).translations = Object.fromEntries(((translationsRes.results || []) as any[]).map((row) => [row.locale, row]));
 				const tags = await getSiteTags();
-				return siteHtmlResponse(renderNewPostPage({ user, env, categories, tags, post: postWithTags as unknown as SitePost }));
+				return siteHtmlResponse(renderNewPostPage({
+					user,
+					env,
+					categories,
+					tags,
+					post: postWithTags as unknown as SitePost,
+					languages: await getEnabledLanguages(),
+					locale: currentLocale,
+					postI18nEnabled: await canUsePostI18n(),
+				}));
 			}
 
 			const postMatch = url.pathname.match(/^\/posts\/([0-9A-Za-z]+)$/) || url.pathname.match(/^\/post\/([0-9A-Za-z]+)$/);
@@ -268,9 +310,10 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			if (postMatch || queryPostId) {
 				const postId = decodePublicId(postMatch ? postMatch[1] : queryPostId, env);
 				if (!postId) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
+				const localizePost = await canUsePostI18n();
 				const post = await db.prepare(
 					`SELECT
-						posts.*,
+						${localizedPostColumns(localizePost)}
 						users.username as author_name,
 						users.avatar_url as author_avatar,
 						users.role as author_role,
@@ -284,8 +327,9 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					 FROM posts
 					 JOIN users ON posts.author_id = users.id
 					 LEFT JOIN categories ON posts.category_id = categories.id
+					 ${localizedPostJoin(localizePost)}
 					 WHERE posts.id = ?`
-				).bind(postId).first<SitePost>();
+				).bind(...localizedPostParams(localizePost), postId).first<SitePost>();
 				if (!post) return siteHtmlResponse(renderAuthPage('login').replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				const postStatus = String((post as any).status || 'approved');
 				const canPreviewPending = user ? (() => {
@@ -328,6 +372,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const categoryId = url.searchParams.get('category_id') || '';
 				const q = (url.searchParams.get('q') || '').trim();
 				const sortBy = (url.searchParams.get('sort_by') || 'time').toLowerCase();
+				const localizePosts = await canUsePostI18n();
 				const includeAdminOnly = user ? canAdmin(user as any, 'posts') || canAdmin(user as any, 'categories') : false;
 				const conditions: string[] = [
 					"COALESCE(posts.status, 'approved') = 'approved'",
@@ -341,10 +386,10 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					countParams.push(categoryId);
 				}
 				if (q) {
-					conditions.push('(posts.title LIKE ? OR posts.content LIKE ?)');
+					conditions.push(localizePosts ? '(posts.title LIKE ? OR posts.content LIKE ? OR pt.title LIKE ? OR pt.content LIKE ?)' : '(posts.title LIKE ? OR posts.content LIKE ?)');
 					const like = `%${q}%`;
-					params.push(like, like);
-					countParams.push(like, like);
+					params.push(...(localizePosts ? [like, like, like, like] : [like, like]));
+					countParams.push(...(localizePosts ? [like, like, like, like] : [like, like]));
 				}
 				const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
 				const sortExpr = sortBy === 'comments'
@@ -358,7 +403,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const [postsResult, countResult] = await Promise.all([
 					db.prepare(
 						`SELECT
-							posts.*,
+							${localizedPostColumns(localizePosts)}
 							users.username as author_name,
 							users.avatar_url as author_avatar,
 							users.role as author_role,
@@ -371,11 +416,12 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 						 FROM posts
 						 JOIN users ON posts.author_id = users.id
 						 LEFT JOIN categories ON posts.category_id = categories.id
+						 ${localizedPostJoin(localizePosts)}
 						 ${where}
 						 ORDER BY ${pinSortExpr}, ${sortExpr}, posts.created_at DESC
 						 LIMIT ? OFFSET ?`
-					).bind(...params, pageSize, offset).all(),
-					db.prepare(`SELECT COUNT(*) as total FROM posts LEFT JOIN categories ON posts.category_id = categories.id ${where}`).bind(...countParams).first<{ total: number }>(),
+					).bind(...localizedPostParams(localizePosts), ...params, pageSize, offset).all(),
+					db.prepare(`SELECT COUNT(*) as total FROM posts LEFT JOIN categories ON posts.category_id = categories.id ${localizedPostJoin(localizePosts)} ${where}`).bind(...localizedPostParams(localizePosts), ...countParams).first<{ total: number }>(),
 				]);
 				const posts = await attachTagsToPosts(applyLocalizedCategoriesToPosts((postsResult.results || []) as any[], categories));
 				const allCategory = await getAllCategoryCopy(Number(countResult?.total || 0));

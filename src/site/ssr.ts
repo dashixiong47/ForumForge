@@ -7,6 +7,7 @@ import type {
 	PageState,
 	SiteCategory,
 	SiteComment,
+	SiteLanguage,
 	SiteNotification,
 	SitePost,
 	SiteProgressLog,
@@ -14,7 +15,7 @@ import type {
 	SiteUser,
 } from './types';
 
-export type { PageState, SiteCategory, SiteComment, SiteNotification, SitePost, SiteProgressLog, SiteTag, SiteUser } from './types';
+export type { PageState, SiteCategory, SiteComment, SiteLanguage, SiteNotification, SitePost, SiteProgressLog, SiteTag, SiteUser } from './types';
 
 type LayoutOptions = {
 	title: string;
@@ -288,7 +289,89 @@ document.addEventListener('click',(e)=>{
 document.addEventListener('keydown',(e)=>{if(e.key==='Escape')closeFloatingMenus(null);});
 window.addEventListener('resize',()=>closeFloatingMenus(null));
 window.addEventListener('scroll',()=>closeFloatingMenus(null),true);
-function renderPreview(text){return String(text||'').split(/\\n{2,}/).map((block)=>{const media=block.trim().match(/^!\\[([^\\]]*)\\]\\(([^)\\s]+).*\\)$/);if(media){const url=media[2];return /\\.(mp4|webm|ogg|mov)(?:[?#].*)?$/i.test(url)?'<video controls preload="metadata" src="'+escapeHtmlClient(url)+'"></video>':'<img src="'+escapeHtmlClient(url)+'" alt="'+escapeHtmlClient(media[1])+'">';}return '<p>'+escapeHtmlClient(block).replace(/\\n/g,'<br>')+'</p>';}).join('')||'<p class="muted">'+escapeHtmlClient(siteT('common.previewEmpty','预览会在这里显示。'))+'</p>';}
+function previewInline(line){
+ let html=escapeHtmlClient(line);
+ html=html.replace(/&lt;span\\s+style=&quot;\\s*((?:color|background-color)\\s*:\\s*(?:#[0-9a-fA-F]{3,8}|[a-zA-Z]+|rgba?\\([^&<>]+\\)))\\s*&quot;&gt;/g,(_m,style)=>'<span style="'+escapeHtmlClient(style.replace(/\\s+/g,''))+'">');
+ html=html.replace(/&lt;\\/span&gt;/g,'</span>').replace(/&lt;strong&gt;/g,'<strong>').replace(/&lt;\\/strong&gt;/g,'</strong>');
+ html=html.replace(/\`([^\`]+)\`/g,'<code>$1</code>').replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>$1</strong>').replace(/\\*([^*]+)\\*/g,'<em>$1</em>');
+ html=html.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+|\\/[^)\\s]+)\\)/g,(_m,text,url)=>'<a href="'+escapeHtmlClient(url)+'" target="'+(String(url).startsWith('http')?'_blank':'_self')+'" rel="noopener noreferrer">'+text+'</a>');
+ return html;
+}
+function renderPreview(text){
+ const source=String(text||'').replace(/\\r\\n/g,'\\n');
+ if(!source.trim())return '<p class="muted">'+escapeHtmlClient(siteT('common.previewEmpty','预览会在这里显示。'))+'</p>';
+ const blocks=[];
+ let quote=[];
+ let codeBlock=null;
+ const fenceMark=String.fromCharCode(96,96,96);
+ const flushQuote=()=>{if(quote.length){blocks.push('<blockquote>'+quote.map((line)=>'<p>'+previewInline(line)+'</p>').join('')+'</blockquote>');quote=[];}};
+ const flushCode=()=>{if(codeBlock){const lang=String(codeBlock.lang||'').replace(/[^a-z0-9_-]/gi,'').slice(0,24);blocks.push('<pre><code'+(lang?' class="language-'+lang+'"':'')+'>'+escapeHtmlClient(codeBlock.lines.join('\\n'))+'</code></pre>');codeBlock=null;}};
+ for(const raw of source.split('\\n')){
+  const line=raw.trim();
+  if(codeBlock){
+   if(line.startsWith(fenceMark)){flushCode();continue;}
+   codeBlock.lines.push(raw);
+   continue;
+  }
+  if(line.startsWith(fenceMark)){flushQuote();codeBlock={lang:line.slice(fenceMark.length).trim().split(/\\s+/)[0]||'',lines:[]};continue;}
+  if(!line){flushQuote();continue;}
+  const media=line.match(/^!\\[([^\\]]*)\\]\\(([^)\\s]+).*\\)$/);
+  if(media){flushQuote();const url=media[2];blocks.push(/\\.(mp4|webm|ogg|mov)(?:[?#].*)?$/i.test(url)?'<video controls preload="metadata" src="'+escapeHtmlClient(url)+'"></video>':'<img src="'+escapeHtmlClient(url)+'" alt="'+escapeHtmlClient(media[1])+'">');continue;}
+  const quoted=line.match(/^>\\s?(.*)$/);
+  if(quoted){quote.push(quoted[1]);continue;}
+  flushQuote();
+  const heading=line.match(/^(#{1,6})\\s+(.+)$/);
+  if(heading){const level=Math.min(6,heading[1].length);blocks.push('<h'+level+'>'+previewInline(heading[2])+'</h'+level+'>');continue;}
+  blocks.push('<p>'+previewInline(line)+'</p>');
+ }
+ flushQuote();
+ flushCode();
+ return blocks.join('');
+}
+function postTranslationStore(form){
+ const holder=form?.querySelector?.('textarea[name="translations_json"]');
+ if(!holder)return {};
+ try{return JSON.parse(holder.value||'{}')||{};}catch{return {};}
+}
+function writePostTranslationStore(form,data){
+ const holder=form?.querySelector?.('textarea[name="translations_json"]');
+ if(holder)holder.value=JSON.stringify(data||{});
+}
+function syncCurrentPostTranslation(form){
+ const root=form?.querySelector?.('[data-post-i18n]');
+ if(!root)return {};
+ const locale=normalizeClientLocale(form.locale?.value||SITE_LOCALE);
+ if(!locale)return {};
+ const data=postTranslationStore(form);
+ data[locale]={title:form.title?.value||'',content:form.content?.value||''};
+ writePostTranslationStore(form,data);
+ return {locale,translations:data};
+}
+function switchPostLocale(control){
+ const form=control.closest('form');
+ if(!form)return;
+ syncCurrentPostTranslation(form);
+ const next=normalizeClientLocale(control.value||control.dataset.postLocale||'');
+ if(!next)return;
+ const data=postTranslationStore(form);
+ const record=data[next]||{title:'',content:''};
+ if(form.locale)form.locale.value=next;
+ if(control.value!==next)control.value=next;
+ if(form.title)form.title.value=record.title||'';
+ if(form.content){
+  form.content.value=record.content||'';
+  form.content.dispatchEvent(new Event('input',{bubbles:true}));
+ }
+}
+function updateInputCounter(input){
+ const target=document.querySelector(input?.dataset?.countTarget||'');
+ if(!target)return;
+ const value=String(input.value||'');
+ target.textContent=String(value.length);
+ const max=Number(input.getAttribute('maxlength')||0);
+ const wrap=target.closest('.content-count')||target.parentElement;
+ if(wrap&&max)wrap.classList.toggle('is-over',value.length>max);
+}
 async function loadClientConfig(){
  if(window.__APP_CONFIG__)return window.__APP_CONFIG__;
  if(typeof loadConfig==='function')return loadConfig();
@@ -352,9 +435,19 @@ document.addEventListener('submit',async(e)=>{
   if(action==='post'){
    const tagIds=[...form.querySelectorAll('input[name="tag_ids"]:checked')].map(i=>Number(i.value));
    const saveDraft=submit?.dataset?.draft==='1';
-   const payload={title:form.title.value,category_id:form.category_id.value||null,tag_ids:tagIds,content:form.content.value,min_view_level:Math.max(0,Number(form.min_view_level?.value||0)),min_comment_level:Math.max(0,Number(form.min_comment_level?.value||0)),status:saveDraft?'draft':'publish'};
-   if(form.post_id?.value){const data=await api('/api/posts/'+form.post_id.value,{method:'PUT',headers:nonceHeaders(true),body:JSON.stringify(payload)});keepLoading=true;location.href=data.status==='draft'?'/me?tab=drafts':(data.status==='pending'?'/?pending=post':(data.url||('/posts/'+form.post_id.value)));return;}
-   const data=await api('/api/posts',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify(payload)});keepLoading=true;location.href=data.status==='draft'?'/me?tab=drafts':(data.status==='pending'?'/?pending=post':(data.url||('/posts/'+data.id)));return;
+   const i18nPayload=syncCurrentPostTranslation(form);
+   const payload={title:form.title.value,category_id:form.category_id.value||null,tag_ids:tagIds,content:form.content.value,min_view_level:Math.max(0,Number(form.min_view_level?.value||0)),min_comment_level:Math.max(0,Number(form.min_comment_level?.value||0)),status:saveDraft?'draft':'publish',locale:i18nPayload.locale,translations:i18nPayload.translations};
+   if(form.post_id?.value){
+    const data=await api('/api/posts/'+form.post_id.value,{method:'PUT',headers:nonceHeaders(true),body:JSON.stringify(payload)});
+    if(saveDraft||data.status==='draft'){showMessage(siteT('compose.draftSaved','草稿已保存。'),'ok');return;}
+    keepLoading=true;location.href=data.status==='pending'?'/?pending=post':(data.url||('/posts/'+form.post_id.value));return;
+   }
+   const data=await api('/api/posts',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify(payload)});
+   if(saveDraft||data.status==='draft'){
+    if(data.id&&!form.post_id){const id=document.createElement('input');id.type='hidden';id.name='post_id';id.value=String(data.id);form.prepend(id);}
+    showMessage(siteT('compose.draftSaved','草稿已保存。'),'ok');return;
+   }
+   keepLoading=true;location.href=data.status==='pending'?'/?pending=post':(data.url||('/posts/'+data.id));return;
   }
   if(action==='settings'){
    await api('/api/user/profile',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify({username:form.username.value,avatar_url:form.avatar_url.value,email_notifications:form.email_notifications.checked,show_public_posts:form.show_public_posts?form.show_public_posts.checked:true})});
@@ -373,8 +466,12 @@ document.addEventListener('submit',async(e)=>{
 document.addEventListener('input',(e)=>{
  const input=e.target.closest?.('[data-count-target]');
  if(!input)return;
- const target=document.querySelector(input.dataset.countTarget);
- if(target)target.textContent=String((input.value||'').length);
+ updateInputCounter(input);
+});
+document.querySelectorAll('[data-count-target]').forEach(updateInputCounter);
+document.addEventListener('change',(e)=>{
+ const localeSelect=e.target.closest?.('[data-post-locale]');
+ if(localeSelect){switchPostLocale(localeSelect);}
 });
 document.addEventListener('click',async(e)=>{
  const registerCode=e.target.closest('[data-register-send-code]');
@@ -1006,8 +1103,42 @@ export function renderNewPostPage(options: {
 	categories: SiteCategory[];
 	tags: SiteTag[];
 	post?: SitePost | null;
+	languages?: SiteLanguage[];
+	locale?: string;
+	postI18nEnabled?: boolean;
 }): string {
 	const post = options.post || null;
+	const normalizeLocale = (value: unknown) => {
+		const raw = String(value || '').trim();
+		if (!raw) return '';
+		const mapped = raw.toLowerCase() === 'zh' ? 'zh-CN' : raw.toLowerCase() === 'en' ? 'en-US' : raw;
+		const match = mapped.match(/^([a-z]{2})(?:[-_]([a-z]{2}))?$/i);
+		if (!match) return '';
+		return match[2] ? `${match[1].toLowerCase()}-${match[2].toUpperCase()}` : match[1].toLowerCase();
+	};
+	const languages = (options.languages?.length ? options.languages : [
+		{ code: 'zh-CN', name: 'Chinese', native_name: '简体中文', enabled: 1 },
+		{ code: 'en-US', name: 'English', native_name: 'English', enabled: 1 },
+	] as SiteLanguage[]).map((lang) => ({ ...lang, code: normalizeLocale(lang.code) || lang.code }));
+	const activeLocale = normalizeLocale(options.locale) || languages[0]?.code || 'zh-CN';
+	const canUsePostI18n = Boolean(options.postI18nEnabled || options.user.role === 'admin');
+	const translationMap: Record<string, { title: string; content: string }> = {};
+	for (const [localeKey, value] of Object.entries(post?.translations || {})) {
+		const locale = normalizeLocale((value as any)?.locale || localeKey);
+		if (!locale) continue;
+		translationMap[locale] = {
+			title: String((value as any)?.title || ''),
+			content: String((value as any)?.content || ''),
+		};
+	}
+	if (post && !translationMap[activeLocale]) {
+		translationMap[activeLocale] = { title: String(post.title || ''), content: String(post.content || '') };
+	}
+	const initialTranslation = canUsePostI18n
+		? (translationMap[activeLocale] || { title: String(post?.title || ''), content: String(post?.content || '') })
+		: { title: String(post?.title || ''), content: String(post?.content || '') };
+	const initialTitle = initialTranslation.title;
+	const initialContent = initialTranslation.content;
 	const selectedCategory = String((post as any)?.category_id || '');
 	const minViewLevel = Math.max(0, Number(post?.min_view_level || 0));
 	const minCommentLevel = Math.max(0, Number(post?.min_comment_level || 0));
@@ -1017,15 +1148,40 @@ export function renderNewPostPage(options: {
 	const modeTitle = post ? '编辑帖子' : '发布新帖';
 	const emailVerified = Number(options.user.verified || 0) === 1;
 	const verifyNotice = emailVerified ? '' : '<div class="status-note"><strong data-i18n="settings.emailUnverifiedTitle">邮箱未验证</strong><span data-i18n="settings.emailUnverifiedHint">请先完成邮箱验证，验证后才能发布内容、评论、点赞、签到和上传帖子媒体。</span><button class="btn" type="button" data-resend-verification data-i18n="settings.resendVerification">重新发送验证邮件</button></div>';
+	const languageSwitch = canUsePostI18n ? `<div class="compose-language" data-post-i18n>
+				<input type="hidden" name="locale" value="${attr(activeLocale)}">
+				<textarea name="translations_json" hidden>${escapeHtml(JSON.stringify(translationMap))}</textarea>
+				<label class="compose-language-label" for="compose-locale" data-i18n="compose.contentLanguage">内容语言</label>
+				<select id="compose-locale" class="compose-lang-select" data-post-locale>${languages.map((lang) => {
+					const code = lang.code;
+					const name = lang.native_name || lang.name || code;
+					return `<option value="${attr(code)}" ${code === activeLocale ? 'selected' : ''}>${escapeHtml(name)}</option>`;
+				}).join('')}</select>
+			</div>` : '';
+	const composeStyle = `<style>
+.form-shell .compose-head{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--border);padding:14px 16px}
+.form-shell .compose-head h2{margin:0;border:0;padding:0}
+.compose-head-right{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-left:auto;min-width:0}
+.compose-language{display:flex;align-items:center;gap:8px;min-width:0}
+.compose-language-label{color:var(--muted);font-size:12px;font-weight:800;white-space:nowrap}
+.compose-lang-select{height:32px;min-width:138px;border:1px solid rgba(88,166,255,.36);border-radius:999px;background-color:#0d1320;color:#dceaff;padding:0 34px 0 12px;font-weight:900;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16'%3E%3Cpath fill='%239ecbff' d='M4.2 6.2 8 10l3.8-3.8z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;background-size:14px 14px;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
+.compose-lang-select:hover,.compose-lang-select:focus{border-color:rgba(88,166,255,.78);background-color:#101b2d;box-shadow:0 0 0 3px rgba(88,166,255,.12)}
+.content-count{display:inline-flex;align-items:center;justify-content:flex-end;gap:5px;color:var(--muted);font-size:12px;font-weight:800;margin:0;white-space:nowrap}
+.content-count.is-over{color:var(--danger)}
+.compose-editor .panel-body{min-height:0;flex:1;overflow:hidden;display:flex;flex-direction:column}
+.compose-editor .panel-body .field{min-height:0;flex:1;margin:0;display:flex;flex-direction:column}
+.compose-editor textarea[name="content"]{flex:1;width:100%;min-height:0;height:100%;resize:none}
+@media(max-width:900px){.form-shell .compose-head{align-items:flex-start;flex-direction:column}.compose-head-right{width:100%;justify-content:space-between;margin-left:0}.compose-language{min-width:0}.compose-lang-select{min-width:120px;max-width:48vw}}
+</style>`;
 	return renderSiteLayout({
 		title: modeTitle,
 		user: options.user,
 		categories: options.categories,
 		wide: true,
 		fixed: true,
-		body: `<form data-action="post" class="form-shell">${post ? `<input type="hidden" name="post_id" value="${post.id}">` : ''}
-			<section class="panel compose-sidebar"><h2 data-i18n="compose.info">帖子信息</h2><div class="panel-body"><div class="field"><label data-i18n="compose.title">标题</label><input name="title" maxlength="30" data-i18n-placeholder="compose.titlePlaceholder" placeholder="输入帖子标题..." value="${attr(post?.title || '')}" required></div><div class="field"><label data-i18n="compose.category">分类</label><select name="category_id">${categoryOptions}</select></div><div class="field"><label data-i18n="compose.tags">标签</label><div class="tag-checks">${tagOptions}</div></div><div class="field access-fields"><label data-i18n="compose.accessControl">等级权限</label><div class="level-input-row"><label><span data-i18n="compose.minViewLevel">查看等级</span><input name="min_view_level" type="number" min="0" max="999" value="${minViewLevel}"></label><label><span data-i18n="compose.minCommentLevel">评论等级</span><input name="min_comment_level" type="number" min="0" max="999" value="${minCommentLevel}"></label></div><small class="muted" data-i18n="compose.levelHint">0 表示不限制；作者和管理员不受限制。</small></div>${verifyNotice}<div class="field"><label data-i18n="compose.media">媒体</label><label class="upload-card ${emailVerified ? '' : 'is-disabled'}"><input type="file" accept="image/*,video/*" data-upload data-target="textarea[name=content]" ${emailVerified ? '' : 'disabled'} hidden><span class="upload-icon">${toolbarIcon('upload')}</span><strong data-i18n="compose.uploadMedia">上传媒体</strong><small data-i18n="compose.mediaHint">上传后会自动插入 Markdown，支持图文混排和视频。</small></label></div><div class="message" data-message></div></div></section>
-			<section class="panel compose-editor"><h2 data-i18n="compose.content">内容</h2><div class="md-toolbar" aria-label="Markdown toolbar">
+		body: `${composeStyle}<form data-action="post" class="form-shell">${post ? `<input type="hidden" name="post_id" value="${post.id}">` : ''}
+			<section class="panel compose-sidebar"><h2 data-i18n="compose.info">帖子信息</h2><div class="panel-body"><div class="field"><label data-i18n="compose.title">标题</label><input name="title" maxlength="30" data-i18n-placeholder="compose.titlePlaceholder" placeholder="输入帖子标题..." value="${attr(initialTitle)}" required></div><div class="field"><label data-i18n="compose.category">分类</label><select name="category_id">${categoryOptions}</select></div><div class="field"><label data-i18n="compose.tags">标签</label><div class="tag-checks">${tagOptions}</div></div><div class="field access-fields"><label data-i18n="compose.accessControl">等级权限</label><div class="level-input-row"><label><span data-i18n="compose.minViewLevel">查看等级</span><input name="min_view_level" type="number" min="0" max="999" value="${minViewLevel}"></label><label><span data-i18n="compose.minCommentLevel">评论等级</span><input name="min_comment_level" type="number" min="0" max="999" value="${minCommentLevel}"></label></div><small class="muted" data-i18n="compose.levelHint">0 表示不限制；作者和管理员不受限制。</small></div>${verifyNotice}<div class="field"><label data-i18n="compose.media">媒体</label><label class="upload-card ${emailVerified ? '' : 'is-disabled'}"><input type="file" accept="image/*,video/*" data-upload data-target="textarea[name=content]" ${emailVerified ? '' : 'disabled'} hidden><span class="upload-icon">${toolbarIcon('upload')}</span><strong data-i18n="compose.uploadMedia">上传媒体</strong><small data-i18n="compose.mediaHint">上传后会自动插入 Markdown，支持图文混排和视频。</small></label></div><div class="message" data-message></div></div></section>
+			<section class="panel compose-editor"><div class="compose-head"><h2 data-i18n="compose.content">内容</h2><div class="compose-head-right">${languageSwitch}<div class="content-count"><span data-i18n="compose.contentCount">正文长度</span><span id="compose-content-count">${initialContent.length}</span><span>/3000</span></div></div></div><div class="md-toolbar" aria-label="Markdown toolbar">
 				${mdTool('bold', 'Bold', 'bold', 'compose.toolbar.bold')}
 				${mdTool('italic', 'Italic', 'italic', 'compose.toolbar.italic')}
 				${mdTool('strike', 'Strike', 'strike', 'compose.toolbar.strike')}
@@ -1040,8 +1196,8 @@ export function renderNewPostPage(options: {
 				${mdTool('image', 'Image', 'image', 'compose.toolbar.image')}
 				${mdTool('code', 'Code', 'code', 'compose.toolbar.code')}
 				${mdTool('codeblock', 'Code block', 'codeblock', 'compose.toolbar.codeblock')}
-			</div><div class="panel-body"><div class="field"><textarea name="content" maxlength="3000" required data-preview-source="[data-live-preview]" data-i18n-placeholder="compose.contentPlaceholder" placeholder="支持 Markdown，可直接混排文字、图片和视频...">${escapeHtml(post?.content || '')}</textarea></div></div></section>
-			<section class="panel compose-preview"><h2 data-i18n="compose.preview">预览</h2><div class="editor-preview" data-live-preview>${post ? renderMarkdown(post.content) : '<span data-i18n="compose.previewEmpty">预览会在发布后按 Markdown 渲染。</span>'}</div><div class="panel-body"><div class="toolbar toolbar-end"><a class="btn" href="${post ? publicPostPath(post.id, options.env) : '/'}" data-i18n="common.cancel">取消</a><button class="btn" type="submit" formnovalidate data-draft="1" ${emailVerified ? '' : 'disabled'} data-i18n="compose.saveDraft">保存草稿</button><button class="btn primary" type="submit" ${emailVerified ? '' : 'disabled'} data-i18n="${post ? 'compose.save' : 'index.newPost'}">${post ? '保存修改' : '发布帖子'}</button></div></div></section>
+			</div><div class="panel-body"><div class="field"><textarea name="content" maxlength="3000" required data-count-target="#compose-content-count" data-preview-source="[data-live-preview]" data-i18n-placeholder="compose.contentPlaceholder" placeholder="支持 Markdown，可直接混排文字、图片和视频...">${escapeHtml(initialContent)}</textarea></div></div></section>
+			<section class="panel compose-preview"><h2 data-i18n="compose.preview">预览</h2><div class="editor-preview" data-live-preview>${post ? renderMarkdown(initialContent) : '<span data-i18n="compose.previewEmpty">预览会在发布后按 Markdown 渲染。</span>'}</div><div class="panel-body"><div class="toolbar toolbar-end"><a class="btn" href="${post ? publicPostPath(post.id, options.env) : '/'}" data-i18n="common.cancel">取消</a><button class="btn" type="submit" formnovalidate data-draft="1" ${emailVerified ? '' : 'disabled'} data-i18n="compose.saveDraft">保存草稿</button><button class="btn primary" type="submit" ${emailVerified ? '' : 'disabled'} data-i18n="${post ? 'compose.save' : 'index.newPost'}">${post ? '保存修改' : '发布帖子'}</button></div></div></section>
 		</form>`,
 	});
 }

@@ -1807,6 +1807,9 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 	const idCodecField = `<div class="admin-section-title mt-12"><strong data-i18n="admin.settings.idCodec">URL 编码密钥</strong><span data-i18n="admin.settings.idCodecDesc">用于隐藏公开 URL 中的数字 ID，留空则使用环境变量。</span></div>
 	${adminField('admin.settings.idCodecSecret', '编码密钥', adminInput({ id: 'id_codec_secret', type: 'password', autocomplete: 'new-password', value: settings.id_codec_secret || '', placeholder: '至少 16 个字符' }), 'admin.settings.idCodecSecretHint', '上线后修改会让旧编码链接失效；旧数字链接仍兼容。')}`;
 	const notifyPanelWithLogs = adminPanel('admin.settings.securityNotifications', '安全与通知', 'admin.settings.securityNotificationsDesc', '控制验证、管理操作通知和访问日志保留。', `<div class="settings-toggle-grid">${rows}</div>${idCodecField}${logRetentionFields}`);
+	const contentPanel = adminPanel('admin.settings.contentPublishing', '内容发布', 'admin.settings.contentPublishingDesc', '控制发帖编辑器和内容能力。', `<div class="settings-toggle-grid">
+		${adminSwitch('posts_i18n_enabled', 'admin.settings.postsI18nEnabled', '启用多语言帖子', Boolean(settings.posts_i18n_enabled ?? true))}
+	</div><p class="muted" data-i18n="admin.settings.postsI18nHint">开启后，发帖和编辑时可维护多个语言版本；管理员始终可用。</p>`, 'settings-wide');
 	const oauthProviders = [
 		['google', 'Google'],
 		['github', 'GitHub'],
@@ -1914,6 +1917,7 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 	<section class="settings-main">
 		<div class="settings-tabs">
 			<button class="settings-tab active" type="button" data-settings-tab="security" data-i18n="admin.settings.securityNotifications">安全与通知</button>
+			<button class="settings-tab" type="button" data-settings-tab="content" data-i18n="admin.settings.contentPublishing">内容发布</button>
 			<button class="settings-tab" type="button" data-settings-tab="maintenance" data-i18n="admin.settings.maintenance">维护模式</button>
 			<button class="settings-tab" type="button" data-settings-tab="oauth" data-i18n="admin.settings.oauthLogin">第三方登录</button>
 			<button class="settings-tab" type="button" data-settings-tab="moderation" data-i18n="admin.moderation.title">审核管理</button>
@@ -1922,6 +1926,7 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 		</div>
 		<div class="settings-panels">
 			<div class="settings-tab-panel active" data-settings-panel="security">${notifyPanelWithLogs}</div>
+			<div class="settings-tab-panel" data-settings-panel="content">${contentPanel}</div>
 			<div class="settings-tab-panel" data-settings-panel="maintenance">${maintenancePanel}</div>
 			<div class="settings-tab-panel" data-settings-panel="oauth">${oauthPanel}</div>
 			<div class="settings-tab-panel" data-settings-panel="moderation">${moderationPanel}</div>
@@ -2007,7 +2012,7 @@ document.getElementById('save-settings')?.addEventListener('click',async()=>{
 	const btn=document.getElementById('save-settings');
 	const body={};
 	writeSettingsLocalized();
-	['turnstile_enabled','notify_on_user_delete','notify_on_username_change','notify_on_avatar_change','notify_on_manual_verify','maintenance_enabled','oauth_google_enabled','oauth_github_enabled','oauth_epic_enabled'].forEach(k=>body[k]=document.getElementById(k).checked);
+	['turnstile_enabled','notify_on_user_delete','notify_on_username_change','notify_on_avatar_change','notify_on_manual_verify','maintenance_enabled','oauth_google_enabled','oauth_github_enabled','oauth_epic_enabled','posts_i18n_enabled'].forEach(k=>body[k]=document.getElementById(k).checked);
 	['site_name','site_tagline','site_icon_url','maintenance_title','maintenance_message','maintenance_until','smtp_host','smtp_port','smtp_user','smtp_pass','smtp_from','smtp_from_name','oauth_google_client_id','oauth_google_client_secret','oauth_github_client_id','oauth_github_client_secret','oauth_epic_client_id','oauth_epic_client_secret'].forEach(k=>body[k]=document.getElementById(k).value);
 	['moderation_posts_default','moderation_comments_default','moderation_default_reject_reason','moderation_reject_reasons','id_codec_secret','visit_log_retention_days','visit_log_max_rows'].forEach(k=>body[k]=document.getElementById(k).value);
 	['reward_checkin_points','reward_checkin_experience','reward_post_points','reward_post_experience','reward_reply_points','reward_reply_experience','reward_post_replied_points','reward_post_replied_experience','level_max','level_base_experience','level_growth_multiplier'].forEach(k=>body[k]=document.getElementById(k).value);

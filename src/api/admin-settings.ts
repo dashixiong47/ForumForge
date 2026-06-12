@@ -65,6 +65,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 					oauth_epic_enabled: false,
 					oauth_epic_client_id: '',
 					oauth_epic_client_secret: '',
+					posts_i18n_enabled: true,
 					moderation_posts_default: 'approved',
 					moderation_comments_default: 'approved',
 					moderation_default_reject_reason: '内容不符合社区规则，请修改后重新提交。',
@@ -105,7 +106,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				const { turnstile_enabled, notify_on_user_delete, notify_on_username_change, notify_on_avatar_change, notify_on_manual_verify,
 					oauth_google_enabled, oauth_github_enabled, oauth_epic_enabled,
 					oauth_google_client_id, oauth_google_client_secret, oauth_github_client_id, oauth_github_client_secret, oauth_epic_client_id, oauth_epic_client_secret,
-					site_name, site_tagline, site_icon_url, id_codec_secret, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from, smtp_from_name, maintenance_enabled, maintenance_title, maintenance_message, maintenance_until, moderation_posts_default, moderation_comments_default, moderation_default_reject_reason, moderation_reject_reasons, visit_log_retention_days, visit_log_max_rows } = body;
+					posts_i18n_enabled, site_name, site_tagline, site_icon_url, id_codec_secret, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from, smtp_from_name, maintenance_enabled, maintenance_title, maintenance_message, maintenance_until, moderation_posts_default, moderation_comments_default, moderation_default_reject_reason, moderation_reject_reasons, visit_log_retention_days, visit_log_max_rows } = body;
 				
 				const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
 				const batch = [];
@@ -119,6 +120,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				if (oauth_google_enabled !== undefined) batch.push(stmt.bind('oauth_google_enabled', oauth_google_enabled ? '1' : '0'));
 				if (oauth_github_enabled !== undefined) batch.push(stmt.bind('oauth_github_enabled', oauth_github_enabled ? '1' : '0'));
 				if (oauth_epic_enabled !== undefined) batch.push(stmt.bind('oauth_epic_enabled', oauth_epic_enabled ? '1' : '0'));
+				if (posts_i18n_enabled !== undefined) batch.push(stmt.bind('posts_i18n_enabled', posts_i18n_enabled ? '1' : '0'));
 				if (oauth_google_client_id !== undefined) batch.push(stmt.bind('oauth_google_client_id', String(oauth_google_client_id || '').trim()));
 				if (oauth_google_client_secret !== undefined) batch.push(stmt.bind('oauth_google_client_secret', String(oauth_google_client_secret || '').trim()));
 				if (oauth_github_client_id !== undefined) batch.push(stmt.bind('oauth_github_client_id', String(oauth_github_client_id || '').trim()));

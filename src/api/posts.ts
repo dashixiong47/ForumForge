@@ -108,6 +108,74 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		return '';
 	};
 
+	const normalizePostLocale = (value: unknown) => {
+		const raw = String(value || '').trim();
+		if (!raw) return '';
+		const mapped = raw.toLowerCase() === 'zh' ? 'zh-CN' : raw.toLowerCase() === 'en' ? 'en-US' : raw;
+		const match = mapped.match(/^([a-z]{2})(?:[-_]([a-z]{2}))?$/i);
+		if (!match) return '';
+		return match[2] ? `${match[1].toLowerCase()}-${match[2].toUpperCase()}` : match[1].toLowerCase();
+	};
+
+	const postsI18nEnabledFor = async (userPayload: UserPayload) => {
+		if (userPayload.role === 'admin' || canAdmin(userPayload, 'posts')) return true;
+		const row = await db.prepare("SELECT value FROM settings WHERE key = 'posts_i18n_enabled'").first<DBSetting>();
+		return row?.value !== '0';
+	};
+
+	const collectPostTranslations = (body: any, title: string, content: string) => {
+		const map = new Map<string, { locale: string; title: string; content: string }>();
+		const add = (localeValue: unknown, titleValue: unknown, contentValue: unknown) => {
+			const locale = normalizePostLocale(localeValue);
+			if (!locale) return;
+			map.set(locale, {
+				locale,
+				title: String(titleValue || '').trim(),
+				content: String(contentValue || ''),
+			});
+		};
+		if (body?.translations && typeof body.translations === 'object') {
+			if (Array.isArray(body.translations)) {
+				for (const item of body.translations) add(item?.locale, item?.title, item?.content);
+			} else {
+				for (const [locale, item] of Object.entries(body.translations)) {
+					add(locale, (item as any)?.title, (item as any)?.content);
+				}
+			}
+		}
+		add(body?.locale || body?.content_locale, title, content);
+		return Array.from(map.values()).slice(0, 20);
+	};
+
+	const validatePostTranslations = (body: any, title: string, content: string, enabled: boolean) => {
+		if (!enabled) return '';
+		for (const item of collectPostTranslations(body, title, content)) {
+			if (isVisuallyEmpty(item.title) && isVisuallyEmpty(item.content)) continue;
+			const error = validatePostText(item.title || title, item.content || content);
+			if (error) return error;
+		}
+		return '';
+	};
+
+	const syncPostTranslations = async (postId: number | string, body: any, title: string, content: string, enabled: boolean) => {
+		if (!enabled) return;
+		const records = collectPostTranslations(body, title, content);
+		for (const item of records) {
+			if (isVisuallyEmpty(item.title) && isVisuallyEmpty(item.content)) {
+				await db.prepare('DELETE FROM post_translations WHERE post_id = ? AND locale = ?').bind(postId, item.locale).run();
+				continue;
+			}
+			await db.prepare(
+				`INSERT INTO post_translations (post_id, locale, title, content)
+				 VALUES (?, ?, ?, ?)
+				 ON CONFLICT(post_id, locale) DO UPDATE SET
+				   title = excluded.title,
+				   content = excluded.content,
+				   updated_at = CURRENT_TIMESTAMP`
+			).bind(postId, item.locale, item.title.trim(), item.content.trim()).run();
+		}
+	};
+
 	const resolvePublishedStatus = async (userPayload: UserPayload, isAdminEdit = false) => {
 		if (userPayload.role === 'admin' || isAdminEdit) return 'approved';
 		const moderation = await db.prepare("SELECT value FROM settings WHERE key = 'moderation_posts_default'").first<DBSetting>();
@@ -273,6 +341,9 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 
 			const textError = validatePostText(title, content);
 			if (textError) return jsonResponse({ error: textError }, 400);
+			const i18nEnabled = await postsI18nEnabledFor(userPayload);
+			const translationsError = validatePostTranslations(body, title, content, i18nEnabled);
+			if (translationsError) return jsonResponse({ error: translationsError }, 400);
 
 			const post = await db.prepare('SELECT author_id, status, rejection_reason FROM posts WHERE id = ?').bind(postId).first<any>();
 			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
@@ -298,6 +369,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			await db.prepare(
 				'UPDATE posts SET title = ?, content = ?, category_id = ?, min_view_level = ?, min_comment_level = ?, status = ?, rejection_reason = ? WHERE id = ?'
 			).bind(title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, nextStatus, nextStatus === 'rejected' ? nextRejectReason : '', postId).run();
+			await syncPostTranslations(postId, body, title, content, i18nEnabled);
 			await syncPostTags(postId, tagIds);
 			if (!isAdminEdit && nextStatus === 'pending') await createNotification(userPayload.id, 'post_resubmitted', '帖子已重新提交', '你的帖子修改后已重新提交审核。', { postId });
 			if (!isAdminEdit && String(post.status || 'approved') !== 'approved' && nextStatus === 'approved') await awardUserProgress(userPayload.id, 'create_post', { postId });
@@ -354,6 +426,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(id, id).run();
 			await db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
 			await db.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(id).run();
+			await db.prepare('DELETE FROM post_translations WHERE post_id = ?').bind(id).run();
 			await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
 			await security.logAudit(userPayload.id, 'DELETE_POST', 'post', id, {}, request);
 			invalidatePublicContent?.('post:delete');
@@ -499,9 +572,9 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const tagIds = parseTagIds(body.tag_ids);
 			const textError = validatePostText(title, content);
 			if (textError) return jsonResponse({ error: textError }, 400);
-
-			content = escapeHtml(content);
-			const safeTitle = escapeHtml(title);
+			const i18nEnabled = await postsI18nEnabledFor(userPayload);
+			const translationsError = validatePostTranslations(body, title, content, i18nEnabled);
+			if (translationsError) return jsonResponse({ error: translationsError }, 400);
 
 			if (category_id) {
 				const category = await db.prepare('SELECT id FROM categories WHERE id = ? AND COALESCE(enabled, 1) = 1 AND (? = 1 OR COALESCE(admin_only, 0) = 0)').bind(category_id, canAdmin(userPayload, 'posts') ? 1 : 0).first();
@@ -512,13 +585,16 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const postStatus = saveDraft ? 'draft' : await resolvePublishedStatus(userPayload);
 			const { success, meta } = await db.prepare(
 				'INSERT INTO posts (author_id, title, content, category_id, min_view_level, min_comment_level, status) VALUES (?, ?, ?, ?, ?, ?, ?)'
-			).bind(userPayload.id, safeTitle.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, postStatus).run();
+			).bind(userPayload.id, title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, postStatus).run();
 			const newPostId = meta?.last_row_id;
-			if (success && newPostId) await syncPostTags(newPostId, tagIds);
+			if (success && newPostId) {
+				await syncPostTags(newPostId, tagIds);
+				await syncPostTranslations(newPostId, body, title, normalized.content, i18nEnabled);
+			}
 			if (success && postStatus === 'approved') await awardUserProgress(userPayload.id, 'create_post', { postId: newPostId });
 			if (success && newPostId && postStatus === 'pending') await createNotification(userPayload.id, 'post_pending', '帖子等待审核', '你的帖子已提交，管理员审核后会发布。', { postId: newPostId });
 
-			await security.logAudit(userPayload.id, 'CREATE_POST', 'post', String(newPostId || 'new'), { title_length: safeTitle.length, tag_ids: tagIds, status: postStatus }, request);
+			await security.logAudit(userPayload.id, 'CREATE_POST', 'post', String(newPostId || 'new'), { title_length: title.length, tag_ids: tagIds, status: postStatus }, request);
 			if (postStatus === 'approved') invalidatePublicContent?.('post:create');
 			return jsonResponse({ success, id: newPostId, status: postStatus, url: newPostId ? publicPostPath(newPostId, runtimeEnvForLinks) : undefined }, 201);
 		} catch (e) {
