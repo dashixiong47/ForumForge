@@ -83,6 +83,37 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		}
 	};
 
+	const wantsDraft = (body: any) => body?.draft === true || String(body?.status || '').toLowerCase() === 'draft';
+
+	const normalizePostInput = (body: any, draft: boolean) => {
+		const rawTitle = String(body?.title || '').trim();
+		const rawContent = String(body?.content || '');
+		if (draft) {
+			if (isVisuallyEmpty(rawTitle) && isVisuallyEmpty(rawContent)) return { error: 'Draft cannot be empty' };
+			return {
+				title: rawTitle || '未命名草稿',
+				content: rawContent,
+			};
+		}
+		if (!rawTitle || !rawContent) return { error: 'Missing title or content' };
+		if (isVisuallyEmpty(rawTitle) || isVisuallyEmpty(rawContent)) return { error: 'Title or content cannot be empty' };
+		return { title: rawTitle, content: rawContent };
+	};
+
+	const validatePostText = (title: string, content: string) => {
+		if (hasInvisibleCharacters(title) || hasInvisibleCharacters(content)) return 'Title or content contains invalid invisible characters';
+		if (title.length > 30) return 'Title too long (Max 30 chars)';
+		if (content.length > 3000) return 'Content too long (Max 3000 chars)';
+		if (hasControlCharacters(title) || hasControlCharacters(content)) return 'Title or content contains invalid control characters';
+		return '';
+	};
+
+	const resolvePublishedStatus = async (userPayload: UserPayload, isAdminEdit = false) => {
+		if (userPayload.role === 'admin' || isAdminEdit) return 'approved';
+		const moderation = await db.prepare("SELECT value FROM settings WHERE key = 'moderation_posts_default'").first<DBSetting>();
+		return moderation?.value === 'pending' ? 'pending' : 'approved';
+	};
+
 	if (url.pathname === '/api/posts' && method === 'GET') {
 		try {
 			const limit = parseInt(url.searchParams.get('limit') || '20');
@@ -230,23 +261,24 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		try {
 			const userPayload = await requireVerifiedUser(await authenticate(request));
 			const body = await request.json() as any;
-			const { title, content, category_id } = body;
+			const { category_id } = body;
+			const saveDraft = wantsDraft(body);
+			const normalized = normalizePostInput(body, saveDraft);
+			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
+			const title = normalized.title;
+			const content = normalized.content;
 			const minViewLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_view_level || 0) || 0)));
 			const minCommentLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_comment_level || 0) || 0)));
 			const tagIds = parseTagIds(body.tag_ids);
 
-			if (!title || !content) return jsonResponse({ error: 'Missing parameters' }, 400);
-			if (isVisuallyEmpty(title) || isVisuallyEmpty(content)) return jsonResponse({ error: 'Title or content cannot be empty' }, 400);
-			if (hasInvisibleCharacters(title) || hasInvisibleCharacters(content)) return jsonResponse({ error: 'Title or content contains invalid invisible characters' }, 400);
+			const textError = validatePostText(title, content);
+			if (textError) return jsonResponse({ error: textError }, 400);
 
 			const post = await db.prepare('SELECT author_id, status, rejection_reason FROM posts WHERE id = ?').bind(postId).first<any>();
 			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
 
 			const isAdminEdit = canAdmin(userPayload, 'posts');
 			if (Number(post.author_id) !== Number(userPayload.id) && !isAdminEdit) return jsonResponse({ error: 'Unauthorized' }, 403);
-			if (title.length > 30) return jsonResponse({ error: 'Title too long (Max 30 chars)' }, 400);
-			if (content.length > 3000) return jsonResponse({ error: 'Content too long (Max 3000 chars)' }, 400);
-			if (hasControlCharacters(title) || hasControlCharacters(content)) return jsonResponse({ error: 'Title or content contains invalid control characters' }, 400);
 
 			if (category_id) {
 				const category = await db.prepare('SELECT id FROM categories WHERE id = ? AND COALESCE(enabled, 1) = 1 AND (? = 1 OR COALESCE(admin_only, 0) = 0)').bind(category_id, isAdminEdit ? 1 : 0).first();
@@ -256,9 +288,11 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 
 			let nextStatus = String(post.status || 'approved');
 			let nextRejectReason = String(post.rejection_reason || '');
-			if (!isAdminEdit) {
-				const moderation = await db.prepare("SELECT value FROM settings WHERE key = 'moderation_posts_default'").first<DBSetting>();
-				nextStatus = moderation?.value === 'pending' ? 'pending' : 'approved';
+			if (saveDraft) {
+				nextStatus = 'draft';
+				nextRejectReason = '';
+			} else if (!isAdminEdit || String(post.status || '') === 'draft') {
+				nextStatus = await resolvePublishedStatus(userPayload, isAdminEdit);
 				nextRejectReason = '';
 			}
 			await db.prepare(
@@ -269,8 +303,36 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			if (!isAdminEdit && String(post.status || 'approved') !== 'approved' && nextStatus === 'approved') await awardUserProgress(userPayload.id, 'create_post', { postId });
 
 			await security.logAudit(userPayload.id, 'UPDATE_POST', 'post', postId, { title_length: title.length, tag_ids: tagIds, status: nextStatus }, request);
-			invalidatePublicContent?.('post:update');
-			return jsonResponse({ success: true, status: nextStatus });
+			if (nextStatus === 'approved' || String(post.status || 'approved') === 'approved') invalidatePublicContent?.('post:update');
+			return jsonResponse({ success: true, status: nextStatus, url: publicPostPath(postId, runtimeEnvForLinks) });
+		} catch (e) {
+			return handleError(e);
+		}
+	}
+
+	if (url.pathname.match(/^\/api\/posts\/\d+\/publish$/) && method === 'POST') {
+		const postId = url.pathname.split('/')[3];
+		try {
+			const userPayload = await requireVerifiedUser(await authenticate(request));
+			const post = await db.prepare('SELECT author_id, title, content, category_id, status FROM posts WHERE id = ?').bind(postId).first<any>();
+			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
+			const isAdminEdit = canAdmin(userPayload, 'posts');
+			if (Number(post.author_id) !== Number(userPayload.id) && !isAdminEdit) return jsonResponse({ error: 'Unauthorized' }, 403);
+			const normalized = normalizePostInput({ title: post.title, content: post.content }, false);
+			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
+			const textError = validatePostText(normalized.title, normalized.content);
+			if (textError) return jsonResponse({ error: textError }, 400);
+			if (post.category_id) {
+				const category = await db.prepare('SELECT id FROM categories WHERE id = ? AND COALESCE(enabled, 1) = 1 AND (? = 1 OR COALESCE(admin_only, 0) = 0)').bind(post.category_id, isAdminEdit ? 1 : 0).first();
+				if (!category) return jsonResponse({ error: 'Category not found' }, 400);
+			}
+			const nextStatus = await resolvePublishedStatus(userPayload, isAdminEdit);
+			await db.prepare("UPDATE posts SET status = ?, rejection_reason = '' WHERE id = ?").bind(nextStatus, postId).run();
+			if (String(post.status || '') !== 'approved' && nextStatus === 'approved') await awardUserProgress(Number(post.author_id), 'create_post', { postId });
+			if (nextStatus === 'pending') await createNotification(Number(post.author_id), 'post_pending', '帖子等待审核', '你的草稿已提交，管理员审核后会发布。', { postId });
+			await security.logAudit(userPayload.id, 'PUBLISH_POST', 'post', postId, { status: nextStatus }, request);
+			if (nextStatus === 'approved') invalidatePublicContent?.('post:publish');
+			return jsonResponse({ success: true, status: nextStatus, url: publicPostPath(postId, runtimeEnvForLinks) });
 		} catch (e) {
 			return handleError(e);
 		}
@@ -426,17 +488,17 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
 			if (!(await checkTurnstile(body, ip))) return jsonResponse({ error: 'Turnstile verification failed' }, 403);
 
-			const { title, content: rawContent, category_id } = body;
+			const { category_id } = body;
+			const saveDraft = wantsDraft(body);
+			const normalized = normalizePostInput(body, saveDraft);
+			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
+			const title = normalized.title;
+			let content = normalized.content;
 			const minViewLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_view_level || 0) || 0)));
 			const minCommentLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_comment_level || 0) || 0)));
 			const tagIds = parseTagIds(body.tag_ids);
-			let content = rawContent;
-			if (!title || !content) return jsonResponse({ error: 'Missing title or content' }, 400);
-			if (isVisuallyEmpty(title) || isVisuallyEmpty(content)) return jsonResponse({ error: 'Title or content cannot be empty' }, 400);
-			if (hasInvisibleCharacters(title) || hasInvisibleCharacters(content)) return jsonResponse({ error: 'Title or content contains invalid invisible characters' }, 400);
-			if (title.length > 30) return jsonResponse({ error: 'Title too long (Max 30 chars)' }, 400);
-			if (content.length > 3000) return jsonResponse({ error: 'Content too long (Max 3000 chars)' }, 400);
-			if (hasControlCharacters(title) || hasControlCharacters(content)) return jsonResponse({ error: 'Title or content contains invalid control characters' }, 400);
+			const textError = validatePostText(title, content);
+			if (textError) return jsonResponse({ error: textError }, 400);
 
 			content = escapeHtml(content);
 			const safeTitle = escapeHtml(title);
@@ -447,8 +509,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			}
 			if (!(await validateTagIds(tagIds))) return jsonResponse({ error: 'Tag not found' }, 400);
 
-			const moderation = await db.prepare("SELECT value FROM settings WHERE key = 'moderation_posts_default'").first<DBSetting>();
-			const postStatus = userPayload.role === 'admin' || moderation?.value !== 'pending' ? 'approved' : 'pending';
+			const postStatus = saveDraft ? 'draft' : await resolvePublishedStatus(userPayload);
 			const { success, meta } = await db.prepare(
 				'INSERT INTO posts (author_id, title, content, category_id, min_view_level, min_comment_level, status) VALUES (?, ?, ?, ?, ?, ?, ?)'
 			).bind(userPayload.id, safeTitle.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, postStatus).run();

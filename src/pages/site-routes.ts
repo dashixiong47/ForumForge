@@ -88,24 +88,36 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
 				const safePage = (name: string) => Math.max(1, Math.min(999, Number(url.searchParams.get(name) || 1) || 1));
 				const pageSize = Math.max(5, Math.min(30, Number(url.searchParams.get('pageSize') || 10) || 10));
-				const activeTab = ['posts', 'replies', 'level', 'notifications'].includes(String(url.searchParams.get('tab') || ''))
-					? String(url.searchParams.get('tab')) as 'posts' | 'replies' | 'level' | 'notifications'
+				const activeTab = ['posts', 'drafts', 'replies', 'level', 'notifications'].includes(String(url.searchParams.get('tab') || ''))
+					? String(url.searchParams.get('tab')) as 'posts' | 'drafts' | 'replies' | 'level' | 'notifications'
 					: 'posts';
 				const postsPage = safePage('posts_page');
+				const draftsPage = safePage('drafts_page');
 				const repliesPage = safePage('replies_page');
 				const levelPage = safePage('level_page');
 				const notificationsPage = safePage('notifications_page');
-				const [postsRes, postsCount, commentsRes, commentsCount, progressRes, progressCount, notificationsRes, notificationsCount] = await Promise.all([
+				const [postsRes, postsCount, draftsRes, draftsCount, commentsRes, commentsCount, progressRes, progressCount, notificationsRes, notificationsCount] = await Promise.all([
 					db.prepare(
 						`SELECT posts.*, categories.name as category_name,
 							(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
 						 FROM posts
 						 LEFT JOIN categories ON posts.category_id = categories.id
 						 WHERE posts.author_id = ?
+						   AND COALESCE(posts.status, 'approved') <> 'draft'
 						 ORDER BY posts.created_at DESC
 						 LIMIT ? OFFSET ?`
 					).bind(user.id, pageSize, (postsPage - 1) * pageSize).all(),
-					db.prepare('SELECT COUNT(*) AS count FROM posts WHERE author_id = ?').bind(user.id).first<DBCount>(),
+					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') <> 'draft'").bind(user.id).first<DBCount>(),
+					db.prepare(
+						`SELECT posts.*, categories.name as category_name
+						 FROM posts
+						 LEFT JOIN categories ON posts.category_id = categories.id
+						 WHERE posts.author_id = ?
+						   AND COALESCE(posts.status, 'approved') = 'draft'
+						 ORDER BY posts.created_at DESC
+						 LIMIT ? OFFSET ?`
+					).bind(user.id, pageSize, (draftsPage - 1) * pageSize).all(),
+					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') = 'draft'").bind(user.id).first<DBCount>(),
 					db.prepare(
 						`SELECT comments.*, posts.title as post_title
 						 FROM comments
@@ -134,6 +146,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					db.prepare('SELECT COUNT(*) AS count FROM notifications WHERE user_id = ?').bind(user.id).first<DBCount>(),
 				]);
 				const posts = await attachTagsToPosts(applyLocalizedCategoriesToPosts((postsRes.results || []) as any[], categories));
+				const drafts = await attachTagsToPosts(applyLocalizedCategoriesToPosts((draftsRes.results || []) as any[], categories));
 				const notifications = ((notificationsRes.results || []) as any[]).map((item) => ({
 					...item,
 					url: item.post_id ? `${publicPostPath(item.post_id, env)}${item.comment_id ? `#comment-${item.comment_id}` : ''}` : '/me',
@@ -143,6 +156,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					env,
 					categories,
 					posts: posts as unknown as SitePost[],
+					drafts: drafts as unknown as SitePost[],
 					comments: (commentsRes.results || []) as any[],
 					progressLogs: (progressRes.results || []) as any[],
 					notifications,
@@ -150,6 +164,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					levelSettings: await getLevelSettings(),
 					pagination: {
 						posts: { page: postsPage, pageSize, total: Number(postsCount?.count || 0) },
+						drafts: { page: draftsPage, pageSize, total: Number(draftsCount?.count || 0) },
 						replies: { page: repliesPage, pageSize, total: Number(commentsCount?.count || 0) },
 						level: { page: levelPage, pageSize, total: Number(progressCount?.count || 0) },
 						notifications: { page: notificationsPage, pageSize, total: Number(notificationsCount?.count || 0) },

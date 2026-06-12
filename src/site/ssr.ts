@@ -321,7 +321,7 @@ async function ensureTurnstile(form){
 }
 document.addEventListener('submit',async(e)=>{
  const form=e.target.closest('[data-action]'); if(!form)return; e.preventDefault(); showMessage('');
- const submit=form.querySelector('button[type="submit"]');
+ const submit=e.submitter||form.querySelector('button[type="submit"]');
  const release=setButtonLoading(submit,siteT('common.processing','处理中...'));
  let keepLoading=false;
  try{
@@ -351,9 +351,10 @@ document.addEventListener('submit',async(e)=>{
   }
   if(action==='post'){
    const tagIds=[...form.querySelectorAll('input[name="tag_ids"]:checked')].map(i=>Number(i.value));
-   const payload={title:form.title.value,category_id:form.category_id.value||null,tag_ids:tagIds,content:form.content.value,min_view_level:Math.max(0,Number(form.min_view_level?.value||0)),min_comment_level:Math.max(0,Number(form.min_comment_level?.value||0))};
-   if(form.post_id?.value){const data=await api('/api/posts/'+form.post_id.value,{method:'PUT',headers:nonceHeaders(true),body:JSON.stringify(payload)});keepLoading=true;location.href=data.url||('/posts/'+form.post_id.value);return;}
-   const data=await api('/api/posts',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify(payload)});keepLoading=true;location.href=data.status==='pending'?'/?pending=post':(data.url||('/posts/'+data.id));return;
+   const saveDraft=submit?.dataset?.draft==='1';
+   const payload={title:form.title.value,category_id:form.category_id.value||null,tag_ids:tagIds,content:form.content.value,min_view_level:Math.max(0,Number(form.min_view_level?.value||0)),min_comment_level:Math.max(0,Number(form.min_comment_level?.value||0)),status:saveDraft?'draft':'publish'};
+   if(form.post_id?.value){const data=await api('/api/posts/'+form.post_id.value,{method:'PUT',headers:nonceHeaders(true),body:JSON.stringify(payload)});keepLoading=true;location.href=data.status==='draft'?'/me?tab=drafts':(data.status==='pending'?'/?pending=post':(data.url||('/posts/'+form.post_id.value)));return;}
+   const data=await api('/api/posts',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify(payload)});keepLoading=true;location.href=data.status==='draft'?'/me?tab=drafts':(data.status==='pending'?'/?pending=post':(data.url||('/posts/'+data.id)));return;
   }
   if(action==='settings'){
    await api('/api/user/profile',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify({username:form.username.value,avatar_url:form.avatar_url.value,email_notifications:form.email_notifications.checked,show_public_posts:form.show_public_posts?form.show_public_posts.checked:true})});
@@ -432,6 +433,7 @@ document.addEventListener('click',async(e)=>{
   }
  }
  const delPost=e.target.closest('[data-post-delete]'); if(delPost){if(!confirm(siteT('post.deleteConfirm','确定删除这个帖子？')))return;try{await runButtonAction(delPost,siteT('common.deleting','删除中...'),async()=>{const id=delPost.dataset.postDelete;const url=delPost.dataset.admin==='1'?'/api/admin/posts/'+id:'/api/posts/'+id;await api(url,{method:'DELETE',headers:nonceHeaders(false)});location.href=delPost.dataset.redirect||'/';});}catch(err){alert(err.message||String(err));}}
+ const publishDraft=e.target.closest('[data-post-publish]'); if(publishDraft){try{await runButtonAction(publishDraft,siteT('common.processing','处理中...'),async()=>{const id=publishDraft.dataset.postPublish;const data=await api('/api/posts/'+id+'/publish',{method:'POST',headers:nonceHeaders(true),body:'{}'});location.href=data.status==='pending'?'/?pending=post':(data.url||('/posts/'+id));});}catch(err){alert(err.message||String(err));}return;}
  const pinPost=e.target.closest('[data-post-pin]'); if(pinPost){try{await runButtonAction(pinPost,siteT('common.processing','处理中...'),async()=>{await api('/api/admin/posts/'+pinPost.dataset.postPin+'/pin',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify({pinned:pinPost.dataset.pinned!=='1'})});location.reload();});}catch(err){alert(err.message||String(err));}}
  const categoryPinPost=e.target.closest('[data-post-category-pin]'); if(categoryPinPost){try{await runButtonAction(categoryPinPost,siteT('common.processing','处理中...'),async()=>{await api('/api/admin/posts/'+categoryPinPost.dataset.postCategoryPin+'/category-pin',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify({pinned:categoryPinPost.dataset.pinned!=='1'})});location.reload();});}catch(err){alert(err.message||String(err));}}
  const delComment=e.target.closest('[data-comment-delete]'); if(delComment){if(!confirm(siteT('comment.deleteConfirm','确定删除这条评论？')))return;try{await runButtonAction(delComment,siteT('common.deleting','删除中...'),async()=>{const id=delComment.dataset.commentDelete;const url=delComment.dataset.admin==='1'?'/api/admin/comments/'+id:'/api/comments/'+id;await api(url,{method:'DELETE',headers:nonceHeaders(false)});location.reload();});}catch(err){alert(err.message||String(err));}}
@@ -644,6 +646,7 @@ function rejectReasonNote(reason?: string): string {
 
 function statusBadge(status?: string): string {
 	const value = String(status || 'approved');
+	if (value === 'draft') return '<span class="pill" data-i18n="me.postStatus.draft">草稿</span>';
 	if (value === 'pending') return '<span class="pill status-pending" data-i18n="me.postStatus.pending">待审核</span>';
 	if (value === 'rejected') return '<span class="pill status-rejected" data-i18n="me.postStatus.rejected">已拒绝</span>';
 	return '<span class="pill status-approved" data-i18n="me.postStatus.approved">已发布</span>';
@@ -656,12 +659,14 @@ function canManagePost(user: SiteUser | null | undefined, post: SitePost): boole
 function postManageActions(user: SiteUser | null | undefined, post: SitePost, redirect = '/', env?: Partial<Env> | Record<string, unknown>): string {
 	if (!canManagePost(user, post)) return '';
 	const isAdmin = user?.role === 'admin';
+	const isDraft = String(post.status || '') === 'draft';
 	const postPath = publicPostPath(post.id, env);
 	return `<details class="post-actions">
 		<summary><span class="post-action-trigger" role="button" aria-label="Post actions">⋯</span></summary>
 		<div class="post-action-menu">
-			${isAdmin ? `<button class="btn ghost" type="button" data-post-pin="${post.id}" data-pinned="${Number(post.is_pinned || 0)}" data-i18n="${post.is_pinned ? 'post.unpinGlobal' : 'post.pinGlobal'}">${post.is_pinned ? '取消全局置顶' : '全局置顶'}</button>` : ''}
-			${isAdmin ? `<button class="btn ghost" type="button" data-post-category-pin="${post.id}" data-pinned="${Number(post.is_category_pinned || 0)}" data-i18n="${post.is_category_pinned ? 'post.unpinCategory' : 'post.pinCategory'}">${post.is_category_pinned ? '取消分类置顶' : '分类置顶'}</button>` : ''}
+			${isDraft ? `<button class="btn ghost" type="button" data-post-publish="${post.id}" data-i18n="compose.publishDraft">发布草稿</button>` : ''}
+			${isAdmin && !isDraft ? `<button class="btn ghost" type="button" data-post-pin="${post.id}" data-pinned="${Number(post.is_pinned || 0)}" data-i18n="${post.is_pinned ? 'post.unpinGlobal' : 'post.pinGlobal'}">${post.is_pinned ? '取消全局置顶' : '全局置顶'}</button>` : ''}
+			${isAdmin && !isDraft ? `<button class="btn ghost" type="button" data-post-category-pin="${post.id}" data-pinned="${Number(post.is_category_pinned || 0)}" data-i18n="${post.is_category_pinned ? 'post.unpinCategory' : 'post.pinCategory'}">${post.is_category_pinned ? '取消分类置顶' : '分类置顶'}</button>` : ''}
 			<a class="btn ghost" href="${postPath}/edit" data-i18n="post.edit">编辑</a>
 			<button class="btn ghost danger" type="button" data-post-delete="${post.id}" data-admin="${isAdmin ? 1 : 0}" data-redirect="${attr(redirect)}" data-i18n="post.delete">删除</button>
 		</div>
@@ -876,12 +881,14 @@ export function renderMyContentPage(options: {
 	env?: Partial<Env> | Record<string, unknown>;
 	categories: SiteCategory[];
 	posts: SitePost[];
+	drafts?: SitePost[];
 	comments: SiteComment[];
 	progressLogs: SiteProgressLog[];
 	notifications?: SiteNotification[];
-	activeTab?: 'posts' | 'replies' | 'level' | 'notifications';
+	activeTab?: 'posts' | 'drafts' | 'replies' | 'level' | 'notifications';
 	pagination?: {
 		posts?: PageState;
+		drafts?: PageState;
 		replies?: PageState;
 		level?: PageState;
 		notifications?: PageState;
@@ -900,6 +907,11 @@ export function renderMyContentPage(options: {
 		<p class="post-excerpt no-margin">${escapeHtml(stripMarkdown(post.content).slice(0, 160))}</p>
 		${String(post.status || '') === 'rejected' ? `<div class="status-note rejected"><strong data-i18n="me.rejectReason">拒绝理由</strong><span>${rejectReasonNote(post.rejection_reason)}</span><a class="btn" href="${publicPostPath(post.id, options.env)}/edit" data-i18n="me.editAndResubmit">修改后重新提交</a></div>` : ''}
 	</article>`).join('') || '<div class="panel-body muted" data-i18n="me.emptyPosts">你还没有发布帖子。</div>';
+	const drafts = (options.drafts || []).map((post) => `<article class="compact-item">
+		<div class="compact-item-head"><a class="compact-item-title" href="${publicPostPath(post.id, options.env)}/edit">${escapeHtml(post.title)}</a>${postManageActions(options.user, post, '/me?tab=drafts', options.env)}</div>
+		<div class="meta">${statusBadge('draft')}<span>${post.category_name ? escapeHtml(post.category_name) : i18nText('post.uncategorized', '未分类')}</span><span>·</span><span>${escapeHtml(dateText(post.created_at))}</span></div>
+		<p class="post-excerpt no-margin">${escapeHtml(stripMarkdown(post.content || '').slice(0, 160) || i18nText('me.emptyDraftContent', '草稿还没有正文。'))}</p>
+	</article>`).join('') || '<div class="panel-body muted" data-i18n="me.emptyDrafts">暂无草稿。</div>';
 	const comments = options.comments.map((comment) => `<article class="compact-item">
 		<div class="compact-item-head"><a class="compact-item-title" href="${publicPostPath(comment.post_id, options.env)}">${comment.post_title ? escapeHtml(comment.post_title) : i18nText('me.viewPost', '查看帖子')}</a><button class="btn ghost danger" type="button" data-comment-delete="${comment.id}" data-admin="0" data-i18n="post.delete">删除</button></div>
 		<div class="meta">${statusBadge(comment.status)}<span>${escapeHtml(dateText(comment.created_at))}</span></div>
@@ -953,12 +965,14 @@ export function renderMyContentPage(options: {
 			<section class="panel me-tabs" data-tabs>
 				<div class="me-tab-nav">
 					<button type="button" class="${activeTab === 'posts' ? 'active' : ''}" data-tab-target="posts" data-i18n="me.posts">我的帖子</button>
+					<button type="button" class="${activeTab === 'drafts' ? 'active' : ''}" data-tab-target="drafts" data-i18n="me.drafts">草稿</button>
 					<button type="button" class="${activeTab === 'replies' ? 'active' : ''}" data-tab-target="replies" data-i18n="me.comments">我的回复</button>
 					<button type="button" class="${activeTab === 'notifications' ? 'active' : ''}" data-tab-target="notifications" data-i18n="me.notifications">消息通知</button>
 					<button type="button" class="${activeTab === 'level' ? 'active' : ''}" data-tab-target="level" data-i18n="me.level">成长中心</button>
 				</div>
 				<div class="me-tab-body">
 					<div class="me-tab-panel compact-list" data-tab-panel="posts" ${activeTab === 'posts' ? '' : 'hidden'}><div class="me-scroll-list">${posts}</div>${tabPager('posts', options.pagination?.posts)}</div>
+					<div class="me-tab-panel compact-list" data-tab-panel="drafts" ${activeTab === 'drafts' ? '' : 'hidden'}><div class="me-scroll-list">${drafts}</div>${tabPager('drafts', options.pagination?.drafts)}</div>
 					<div class="me-tab-panel compact-list" data-tab-panel="replies" ${activeTab === 'replies' ? '' : 'hidden'}><div class="me-scroll-list">${comments}</div>${tabPager('replies', options.pagination?.replies)}</div>
 					<div class="me-tab-panel compact-list" data-tab-panel="notifications" ${activeTab === 'notifications' ? '' : 'hidden'}><div class="me-scroll-list">${notifications}</div>${tabPager('notifications', options.pagination?.notifications)}</div>
 					<div class="me-tab-panel me-level-tab" data-tab-panel="level" ${activeTab === 'level' ? '' : 'hidden'}><div class="me-level-content">
@@ -1023,7 +1037,7 @@ export function renderNewPostPage(options: {
 				${mdTool('code', 'Code', 'code', 'compose.toolbar.code')}
 				${mdTool('codeblock', 'Code block', 'codeblock', 'compose.toolbar.codeblock')}
 			</div><div class="panel-body"><div class="field"><textarea name="content" maxlength="3000" required data-preview-source="[data-live-preview]" data-i18n-placeholder="compose.contentPlaceholder" placeholder="支持 Markdown，可直接混排文字、图片和视频...">${escapeHtml(post?.content || '')}</textarea></div></div></section>
-			<section class="panel compose-preview"><h2 data-i18n="compose.preview">预览</h2><div class="editor-preview" data-live-preview>${post ? renderMarkdown(post.content) : '<span data-i18n="compose.previewEmpty">预览会在发布后按 Markdown 渲染。</span>'}</div><div class="panel-body"><div class="toolbar toolbar-end"><a class="btn" href="${post ? publicPostPath(post.id, options.env) : '/'}" data-i18n="common.cancel">取消</a><button class="btn primary" type="submit" ${emailVerified ? '' : 'disabled'} data-i18n="${post ? 'compose.save' : 'index.newPost'}">${post ? '保存修改' : '发布帖子'}</button></div></div></section>
+			<section class="panel compose-preview"><h2 data-i18n="compose.preview">预览</h2><div class="editor-preview" data-live-preview>${post ? renderMarkdown(post.content) : '<span data-i18n="compose.previewEmpty">预览会在发布后按 Markdown 渲染。</span>'}</div><div class="panel-body"><div class="toolbar toolbar-end"><a class="btn" href="${post ? publicPostPath(post.id, options.env) : '/'}" data-i18n="common.cancel">取消</a><button class="btn" type="submit" formnovalidate data-draft="1" ${emailVerified ? '' : 'disabled'} data-i18n="compose.saveDraft">保存草稿</button><button class="btn primary" type="submit" ${emailVerified ? '' : 'disabled'} data-i18n="${post ? 'compose.save' : 'index.newPost'}">${post ? '保存修改' : '发布帖子'}</button></div></div></section>
 		</form>`,
 	});
 }
