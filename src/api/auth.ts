@@ -4,6 +4,8 @@ import { hashPassword, generateToken } from '../core/password';
 import { hasControlCharacters, hasInvisibleCharacters, hasRestrictedKeywords, isVisuallyEmpty } from '../core/validation';
 import { generateIdenticon } from '../utils/identicon';
 import { sendEmail } from '../integrations/smtp';
+import { buildRegistrationOtpEmail, buildResetPasswordEmail } from '../emails/templates';
+import type { EmailLocale } from '../emails/templates';
 import type { JsonResponse } from './types';
 
 export type AuthApiContext = {
@@ -19,7 +21,7 @@ export type AuthApiContext = {
 	authCookie: (token: string, expiresAt: number) => string;
 	getBaseUrl: () => string;
 	checkTurnstile: (body: any, ip: string) => Promise<boolean>;
-	sendVerificationEmail: (email: string, username: string, token: string) => Promise<void>;
+	sendVerificationEmail: (email: string, username: string, token: string, locale?: string) => Promise<void>;
 	createNotification: (targetUserId: number | string, type: string, title: string, body: string, options?: any) => Promise<void>;
 	logAuditEvent: (action: string, resourceType: string, resourceId: string, details?: Record<string, unknown>, userId?: number | string | null) => Promise<void>;
 	usernameFromEmail: (emailValue: string) => Promise<string>;
@@ -44,6 +46,19 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 		logAuditEvent,
 		usernameFromEmail,
 	} = ctx;
+
+	const siteInfo = async () => {
+		const baseUrl = getBaseUrl().replace(/\/+$/, '');
+		const siteNameRow = await db.prepare("SELECT value FROM settings WHERE key='site_name'").first<{ value: string }>().catch(() => null);
+		const siteName = String(siteNameRow?.value || 'ForumForge').trim() || 'ForumForge';
+		const senderEmail = `noreply@${new URL(baseUrl).hostname}`;
+		return { baseUrl, siteName, senderEmail };
+	};
+	const emailLocaleFrom = (raw?: string): EmailLocale => {
+		const value = String(raw || request.headers.get('Accept-Language') || '').toLowerCase();
+		return value.startsWith('zh') || value.includes('zh-') ? 'zh' : 'en';
+	};
+	const registerCodeKey = (email: string) => `register-email:${email}`;
 
 	if (url.pathname === '/api/login' && method === 'POST') {
 		try {
@@ -97,7 +112,7 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 				return jsonResponse({ error: 'Turnstile verification failed' }, 403);
 			}
 
-			const { email } = body;
+			const { email, locale: resetLocale } = body;
 			if (!email) return jsonResponse({ error: 'Missing email' }, 400);
 
 			const user = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<{ id: number }>();
@@ -108,14 +123,16 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			await db.prepare('UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?').bind(token, expires, user.id).run();
 
 			const resetLink = `${getBaseUrl()}/reset?token=${token}`;
-			const emailHtml = `
-				<h1>密码重置请求</h1>
-				<p>请点击下方链接重置您的密码：</p>
-				<a href="${resetLink}">重置密码</a>
-				<p>如果您未请求此操作，请忽略此邮件。</p>
-				<p>此链接将在 1 小时后失效。</p>
-			`;
-			executionCtx.waitUntil(sendEmail(email, '密码重置请求', emailHtml, env).catch(console.error));
+			const resetEmailLocale: EmailLocale = String(resetLocale || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+			const siteNameRow = await db.prepare("SELECT value FROM settings WHERE key='site_name'").first<{value:string}>().catch(() => null);
+			const siteName = siteNameRow?.value || 'ForumForge';
+			const { subject: resetSubject, html: resetHtml } = buildResetPasswordEmail({
+				locale: resetEmailLocale,
+				resetLink,
+				siteName,
+				siteUrl: getBaseUrl(),
+			});
+			executionCtx.waitUntil(sendEmail(email, resetSubject, resetHtml, env).catch(console.error));
 			return jsonResponse({ success: true });
 		} catch (e) {
 			return handleError(e);
@@ -147,6 +164,44 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 		}
 	}
 
+	if (url.pathname === '/api/register/send-code' && method === 'POST') {
+		try {
+			const body = await request.json() as any;
+			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+			if (!(await checkTurnstile(body, ip))) {
+				return jsonResponse({ error: 'Turnstile verification failed' }, 403);
+			}
+
+			const email = String(body.email || '').trim().toLowerCase();
+			const locale = String(body.locale || '');
+			if (!email) return jsonResponse({ error: 'Missing email' }, 400);
+			if (email.length > 50) return jsonResponse({ error: 'Email too long (Max 50 chars)' }, 400);
+			if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return jsonResponse({ error: 'Invalid email' }, 400);
+
+			const existingEmail = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<{ id: number }>();
+			if (existingEmail) return jsonResponse({ error: 'Email already exists' }, 409);
+
+			const code = String(Math.floor(100000 + Math.random() * 900000));
+			const expires = Date.now() + 10 * 60 * 1000;
+			await env.CACHE.put(registerCodeKey(email), JSON.stringify({ code, expires_at: expires, attempts: 0 }), { expirationTtl: 600 });
+
+			const { baseUrl, siteName, senderEmail } = await siteInfo();
+			const emailLocale: EmailLocale = emailLocaleFrom(locale);
+			const { subject, html } = buildRegistrationOtpEmail({ locale: emailLocale, code, targetEmail: email, siteName, siteUrl: baseUrl });
+			try {
+				await sendEmail(email, subject, html, env, senderEmail);
+			} catch (e) {
+				await env.CACHE.delete(registerCodeKey(email)).catch(() => {});
+				return jsonResponse({ error: '验证码发送失败，请检查邮箱地址后重试。' }, 503);
+			}
+
+			await logAuditEvent('REGISTER_CODE_SENT', 'email', email, { email }, null);
+			return jsonResponse({ success: true, message: '验证码已发送，请查收邮件。' });
+		} catch (e) {
+			return handleError(e);
+		}
+	}
+
 	if (url.pathname === '/api/register' && method === 'POST') {
 		try {
 			const body = await request.json() as any;
@@ -155,9 +210,13 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 				return jsonResponse({ error: 'Turnstile verification failed' }, 403);
 			}
 
-			const { email, password } = body;
-			if (!email || !password) return jsonResponse({ error: 'Missing email or password' }, 400);
+			const email = String(body.email || '').trim().toLowerCase();
+			const { password } = body;
+			const code = String(body.code || '').trim();
+			if (!email || !password || !code) return jsonResponse({ error: 'Missing email, password or code' }, 400);
 			if (email.length > 50) return jsonResponse({ error: 'Email too long (Max 50 chars)' }, 400);
+			if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return jsonResponse({ error: 'Invalid email' }, 400);
+			if (!/^\d{6}$/.test(code)) return jsonResponse({ error: '验证码格式不正确。' }, 400);
 
 			const username = await usernameFromEmail(email);
 			if (username.length > 20) return jsonResponse({ error: 'Username too long (Max 20 chars)' }, 400);
@@ -170,14 +229,25 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			const existingEmail = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<{ id: number }>();
 			if (existingEmail) return jsonResponse({ error: 'Email already exists' }, 409);
 
+			const otp = await env.CACHE.get(registerCodeKey(email), 'json') as { code?: string; expires_at?: number; attempts?: number } | null;
+			if (!otp) return jsonResponse({ error: '请先发送验证码。' }, 400);
+			if (Date.now() > Number(otp.expires_at || 0)) {
+				await env.CACHE.delete(registerCodeKey(email)).catch(() => {});
+				return jsonResponse({ error: '验证码已过期，请重新发送。' }, 400);
+			}
+			if (String(otp.code || '').trim() !== code) {
+				await env.CACHE.put(registerCodeKey(email), JSON.stringify({ ...otp, attempts: Number(otp.attempts || 0) + 1 }), { expirationTtl: 600 }).catch(() => {});
+				return jsonResponse({ error: '验证码错误。' }, 400);
+			}
+
 			const passwordHash = await hashPassword(password);
-			const verificationToken = generateToken();
 			const { success, meta } = await db.prepare(
 				'INSERT INTO users (email, username, password, role, verified, verification_token) VALUES (?, ?, ?, "user", ?, ?)'
-			).bind(email, username, passwordHash, 0, verificationToken).run();
+			).bind(email, username, passwordHash, 1, null).run();
 
 			let userId = Number(meta?.last_row_id || 0);
 			if (success) {
+				await env.CACHE.delete(registerCodeKey(email)).catch(() => {});
 				if (userId) {
 					const identicon = await generateIdenticon(String(userId));
 					await db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(identicon, userId).run();
@@ -190,22 +260,11 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 				if (userId) {
 					await createNotification(
 						userId,
-						'email_verification',
-						'请验证邮箱',
-						'验证后才能发帖、评论、点赞、签到和上传帖子媒体。',
-						{ meta: { href: '/settings', email } }
+						'welcome',
+						'注册完成',
+						'邮箱已验证，欢迎开始发帖、评论和上传媒体。',
+						{ meta: { href: '/', email } }
 					);
-					executionCtx.waitUntil((async () => {
-						try {
-							await sendVerificationEmail(email, username, verificationToken);
-						} catch (e) {
-							console.error('[Registration Email Error]', e);
-							await logAuditEvent('email.verification_failed', 'user', String(userId), {
-								email,
-								error: e instanceof Error ? e.message : String(e || 'Unknown error'),
-							}, userId);
-						}
-					})());
 				}
 			}
 
@@ -216,7 +275,7 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			}
 			return jsonResponse({
 				success,
-				message: '注册成功，请前往铃铛通知或邮箱完成验证。',
+				message: '注册成功，已完成邮箱验证。',
 				token,
 				redirect: '/'
 			}, 201, { 'Set-Cookie': authCookie(token, expiresAt) });

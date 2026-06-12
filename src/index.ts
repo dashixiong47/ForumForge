@@ -1,5 +1,7 @@
 
 import { sendEmail } from './integrations/smtp';
+import { buildVerificationEmail } from './emails/templates';
+import type { EmailLocale } from './emails/templates';
 import { uploadImage, deleteImage, listAllKeys, getPublicUrl, getKeyFromUrl, S3Env } from './integrations/s3';
 import { Security, UserPayload } from './core/security';
 import type { SiteCategory, SiteTag, SiteUser } from './site/ssr';
@@ -394,27 +396,15 @@ export default {
 			return user;
 		};
 
-		const escapeEmailHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
-			'&': '&amp;',
-			'<': '&lt;',
-			'>': '&gt;',
-			'"': '&quot;',
-			"'": '&#039;',
-		}[ch] || ch));
-
-		const sendVerificationEmail = async (email: string, username: string, token: string) => {
+		const sendVerificationEmail = async (email: string, username: string, token: string, locale?: string) => {
 			const baseUrl = getBaseUrl().replace(/\/+$/, '');
 			const verifyLink = `${baseUrl}/api/verify?token=${encodeURIComponent(token)}`;
 			const senderEmail = `noreply@${new URL(baseUrl).hostname}`;
-			const emailHtml = `
-				<h1>欢迎加入 ForumForge，${escapeEmailHtml(username)}！</h1>
-				<p>请点击下方链接验证您的邮箱地址。验证后才能发帖、评论、点赞、签到和上传媒体。</p>
-				<p><a href="${escapeEmailHtml(verifyLink)}">验证邮箱</a></p>
-				<p>如果按钮无法点击，请复制以下链接到浏览器打开：</p>
-				<p>${escapeEmailHtml(verifyLink)}</p>
-				<p>如果您未请求此操作，请忽略此邮件。</p>
-			`;
-			await sendEmail(email, '请验证您的邮箱', emailHtml, env, senderEmail);
+			const siteNameRow = await env.DB.prepare("SELECT value FROM settings WHERE key='site_name'").first<{value:string}>().catch(() => null);
+			const siteName = siteNameRow?.value || 'ForumForge';
+			const emailLocale: EmailLocale = String(locale || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+			const { subject, html } = buildVerificationEmail({ locale: emailLocale, username, verifyLink, siteName, siteUrl: baseUrl });
+			await sendEmail(email, subject, html, env, senderEmail);
 		};
 
 		const logAuditEvent = async (
@@ -1130,7 +1120,7 @@ tick();setInterval(tick,1000);
 
 
         const publicPaths = [
-            '/api/config', '/api/login', '/api/register', '/api/verify', 
+            '/api/config', '/api/login', '/api/register', '/api/verify',
             '/api/auth/forgot-password', '/api/auth/reset-password', '/api/verify-email-change',
              // Static/Public GETs
             '/api/posts', '/api/categories', '/api/tags', '/api/plugins', '/api/users', '/api/i18n'

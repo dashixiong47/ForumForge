@@ -1,5 +1,6 @@
 
 import { connect } from 'cloudflare:sockets';
+import { EmailMessage } from 'cloudflare:email';
 
 const DEFAULT_FROM_NAME = '论坛管理员';
 
@@ -27,14 +28,6 @@ interface SmtpConfig {
     fromName: string;
 }
 
-type EmailBindingMessage = {
-	from: string;
-	to: string;
-	subject: string;
-	content?: string;
-	html?: string;
-	text?: string;
-};
 
 async function logEmailFailure(env: any, to: string, subject: string, error: unknown) {
 	const db = env?.DB;
@@ -104,12 +97,12 @@ async function getSmtpConfigFromDB(db: any): Promise<SmtpConfig> {
 
 async function getSenderConfigFromDB(db: any): Promise<{ from: string; fromName: string }> {
 	if (!db) return { from: '', fromName: DEFAULT_FROM_NAME };
-	const rows = await db.prepare("SELECT key, value FROM settings WHERE key IN ('smtp_from', 'smtp_from_name', 'resend_send')").all();
+	const rows = await db.prepare("SELECT key, value FROM settings WHERE key IN ('smtp_from', 'smtp_from_name', 'resend_send', 'site_name')").all();
 	const map: Record<string, string> = {};
 	for (const row of rows.results || []) map[row.key as string] = String(row.value || '');
 	return {
 		from: map.smtp_from || map.resend_send || '',
-		fromName: map.smtp_from_name || DEFAULT_FROM_NAME,
+		fromName: map.smtp_from_name || map.site_name || DEFAULT_FROM_NAME,
 	};
 }
 
@@ -140,16 +133,38 @@ async function sendViaCloudflareEmail(env: any, to: string, subject: string, htm
 		throw new Error('Cloudflare Email binding not configured');
 	}
 	console.log('[Cloudflare Email] Sending email via binding...');
+
 	const text = htmlContent.replace(/<[^>]*>/g, '');
-	const message: EmailBindingMessage = {
-		from: `${fromName} <${fromEmail}>`,
-		to,
-		subject,
-		html: htmlContent,
+	const boundary = `=_boundary_${Date.now()}`;
+	const date = new Date().toUTCString();
+	const senderDomain = fromEmail.split('@')[1] ?? 'mail.local';
+	const messageId = `<${Date.now()}.${Math.random().toString(36).slice(2, 9)}@${senderDomain}>`;
+	const fromHeader = fromName ? `${fromName} <${fromEmail}>` : fromEmail;
+
+	const rawEmail = [
+		`MIME-Version: 1.0`,
+		`Date: ${date}`,
+		`Message-ID: ${messageId}`,
+		`From: ${fromHeader}`,
+		`To: ${to}`,
+		`Subject: ${encodeHeader(subject)}`,
+		`Content-Type: multipart/alternative; boundary="${boundary}"`,
+		``,
+		`--${boundary}`,
+		`Content-Type: text/plain; charset=UTF-8`,
+		``,
 		text,
-		content: htmlContent,
-	};
-	await binding.send(message as any);
+		``,
+		`--${boundary}`,
+		`Content-Type: text/html; charset=UTF-8`,
+		``,
+		htmlContent,
+		``,
+		`--${boundary}--`,
+	].join('\r\n');
+
+	const message = new EmailMessage(fromEmail, to, rawEmail);
+	await binding.send(message);
 	console.log('[Cloudflare Email] Email sent successfully');
 }
 
@@ -444,7 +459,8 @@ export async function sendEmail(to: string, subject: string, htmlContent: string
 
 	const dbSender = await getSenderConfigFromDB(env?.DB).catch(() => ({ from: '', fromName: DEFAULT_FROM_NAME }));
 	const configuredFrom = fromEmail || env?.SMTP_FROM || env?.RESEND_SEND || dbSender.from || '';
-	const configuredFromName = (env && env.SMTP_FROM_NAME) || dbSender.fromName || DEFAULT_FROM_NAME;
+	const envFromName = String((env && env.SMTP_FROM_NAME) || '').trim();
+	const configuredFromName = (envFromName && envFromName !== DEFAULT_FROM_NAME ? envFromName : '') || dbSender.fromName || DEFAULT_FROM_NAME;
 
 	if (env && configuredFrom) {
 		try {

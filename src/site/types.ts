@@ -14,6 +14,7 @@ export interface SiteUser {
 	last_checkin_date?: string | null;
 	created_at?: string;
 	pending_email?: string | null;
+	oauth_count?: number;
 }
 
 export interface SitePost {

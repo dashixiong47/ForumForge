@@ -6,6 +6,8 @@ import { generateIdenticon } from '../utils/identicon';
 import { extractImageUrls } from '../utils/media';
 import { deleteImage, type S3Env } from '../integrations/s3';
 import { sendEmail } from '../integrations/smtp';
+import { buildEmailOtpEmail } from '../emails/templates';
+import type { EmailLocale } from '../emails/templates';
 import { publicPostPath } from '../core/id-codec';
 import type { JsonResponse } from './types';
 
@@ -49,6 +51,11 @@ export async function handleUserApi(ctx: UserApiContext): Promise<Response | nul
 		getBaseUrl,
 		runtimeEnvForLinks,
 	} = ctx;
+	const emailLocaleFrom = (raw?: string): EmailLocale => {
+		const value = String(raw || request.headers.get('Accept-Language') || '').toLowerCase();
+		return value.startsWith('zh') || value.includes('zh-') ? 'zh' : 'en';
+	};
+	const emailBindCodeKey = (userId: number | string) => `email-bind:${userId}`;
 
 	if (url.pathname === '/api/user/profile' && method === 'POST') {
 		try {
@@ -241,6 +248,15 @@ export async function handleUserApi(ctx: UserApiContext): Promise<Response | nul
 
 			const user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(userPayload.id).first<DBUser>();
 			if (!user) return jsonResponse({ error: 'User not found' }, 404);
+			const currentEmail = String(user.email || '').trim().toLowerCase();
+			const hasRealCurrentEmail = !!currentEmail && !currentEmail.endsWith('@oauth.local');
+			if (hasRealCurrentEmail) {
+				return jsonResponse({ error: '邮箱绑定后不能更换。' }, 400);
+			}
+			const oauth = await db.prepare('SELECT user_id FROM oauth_accounts WHERE user_id = ? LIMIT 1').bind(user.id).first<{ user_id: number }>().catch(() => null);
+			if (!oauth) {
+				return jsonResponse({ error: '只有第三方登录账号可以绑定邮箱。' }, 403);
+			}
 
 			if (user.email && user.email.toLowerCase() === new_email.toLowerCase()) {
 				return jsonResponse({ error: '该邮箱已是您当前绑定的邮箱。' }, 400);
@@ -324,6 +340,90 @@ export async function handleUserApi(ctx: UserApiContext): Promise<Response | nul
 			const userPayload = await authenticate(request);
 			const { results } = await db.prepare('SELECT post_id FROM likes WHERE user_id = ?').bind(userPayload.id).all();
 			return jsonResponse((results || []).map((r: any) => r.post_id));
+		} catch (e) {
+			return handleError(e);
+		}
+	}
+
+	if (url.pathname === '/api/user/send-email-code' && method === 'POST') {
+		try {
+			const userPayload = await authenticate(request);
+			const body = await request.json() as any;
+			const { new_email, locale } = body;
+			if (!new_email) return jsonResponse({ error: 'Missing new_email' }, 400);
+			if (new_email.length > 254) return jsonResponse({ error: 'Email too long' }, 400);
+			if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(new_email)) return jsonResponse({ error: '邮箱格式无效' }, 400);
+
+			const user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(userPayload.id).first<DBUser>();
+			if (!user) return jsonResponse({ error: 'User not found' }, 404);
+
+			if (user.email && user.email.toLowerCase() === new_email.toLowerCase()) {
+				return jsonResponse({ error: '该邮箱已是您当前绑定的邮箱。' }, 400);
+			}
+			const exists = await db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').bind(new_email, user.id).first();
+			if (exists) return jsonResponse({ error: 'Email already in use' }, 400);
+
+			const code = String(Math.floor(100000 + Math.random() * 900000));
+			const expires = Date.now() + 10 * 60 * 1000;
+			await env.CACHE.put(emailBindCodeKey(user.id), JSON.stringify({ code, expires_at: expires, email: new_email }), { expirationTtl: 600 });
+
+			const baseUrl = getBaseUrl().replace(/\/+$/, '');
+			const siteNameRow = await db.prepare("SELECT value FROM settings WHERE key='site_name'").first<{value:string}>().catch(() => null);
+			const siteName = siteNameRow?.value || 'ForumForge';
+			const emailLocale: EmailLocale = emailLocaleFrom(locale);
+			const { subject, html } = buildEmailOtpEmail({ locale: emailLocale, code, targetEmail: new_email, siteName, siteUrl: baseUrl });
+
+			try {
+				await sendEmail(new_email, subject, html, env);
+			} catch (e) {
+				await env.CACHE.delete(emailBindCodeKey(user.id)).catch(() => {});
+				return jsonResponse({ error: '验证码发送失败，请检查邮箱地址后重试。' }, 503);
+			}
+
+			await security.logAudit(userPayload.id, 'SEND_EMAIL_CODE', 'user', String(userPayload.id), { new_email }, request);
+			return jsonResponse({ success: true });
+		} catch (e) {
+			return handleError(e);
+		}
+	}
+
+	if (url.pathname === '/api/user/verify-email-code' && method === 'POST') {
+		try {
+			const userPayload = await authenticate(request);
+			const body = await request.json() as any;
+			const { code } = body;
+			if (!code) return jsonResponse({ error: 'Missing code' }, 400);
+
+			const user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(userPayload.id).first<DBUser>();
+			if (!user) return jsonResponse({ error: 'User not found' }, 404);
+			const currentEmail = String(user.email || '').trim().toLowerCase();
+			if (currentEmail && !currentEmail.endsWith('@oauth.local')) {
+				return jsonResponse({ error: '邮箱绑定后不能更换。' }, 400);
+			}
+			const otp = await env.CACHE.get(emailBindCodeKey(user.id), 'json') as { code?: string; expires_at?: number; email?: string } | null;
+			if (!otp) {
+				return jsonResponse({ error: '请先发送验证码。' }, 400);
+			}
+			if (Date.now() > Number(otp.expires_at || 0)) {
+				await env.CACHE.delete(emailBindCodeKey(user.id)).catch(() => {});
+				return jsonResponse({ error: '验证码已过期，请重新发送。' }, 400);
+			}
+			if (String(otp.code || '').trim() !== String(code).trim()) {
+				return jsonResponse({ error: '验证码错误。' }, 400);
+			}
+
+			const newEmail = String(otp.email || '').trim().toLowerCase();
+			if (!newEmail) return jsonResponse({ error: '未找到待绑定邮箱，请重新发送验证码。' }, 400);
+			const exists = await db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').bind(newEmail, user.id).first();
+			if (exists) return jsonResponse({ error: 'Email already in use' }, 400);
+
+			await db.prepare('UPDATE users SET email = ?, verified = 1, pending_email = NULL, email_change_code = NULL, email_change_code_expires = NULL WHERE id = ?')
+				.bind(newEmail, user.id).run();
+			await env.CACHE.delete(emailBindCodeKey(user.id)).catch(() => {});
+			executionCtx.waitUntil(env.CACHE.delete(`user:${user.id}`).catch(() => {}));
+
+			await security.logAudit(userPayload.id, 'VERIFY_EMAIL_CODE', 'user', String(userPayload.id), { new_email: newEmail }, request);
+			return jsonResponse({ success: true, new_email: newEmail });
 		} catch (e) {
 			return handleError(e);
 		}
