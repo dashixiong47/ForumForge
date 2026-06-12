@@ -102,7 +102,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 
 	const validatePostText = (title: string, content: string) => {
 		if (hasInvisibleCharacters(title) || hasInvisibleCharacters(content)) return 'Title or content contains invalid invisible characters';
-		if (title.length > 30) return 'Title too long (Max 30 chars)';
+		if (title.length > 100) return 'Title too long (Max 100 chars)';
 		if (content.length > 3000) return 'Content too long (Max 3000 chars)';
 		if (hasControlCharacters(title) || hasControlCharacters(content)) return 'Title or content contains invalid control characters';
 		return '';

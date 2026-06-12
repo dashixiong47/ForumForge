@@ -1809,7 +1809,9 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 	const notifyPanelWithLogs = adminPanel('admin.settings.securityNotifications', '安全与通知', 'admin.settings.securityNotificationsDesc', '控制验证、管理操作通知和访问日志保留。', `<div class="settings-toggle-grid">${rows}</div>${idCodecField}${logRetentionFields}`);
 	const contentPanel = adminPanel('admin.settings.contentPublishing', '内容发布', 'admin.settings.contentPublishingDesc', '控制发帖编辑器和内容能力。', `<div class="settings-toggle-grid">
 		${adminSwitch('posts_i18n_enabled', 'admin.settings.postsI18nEnabled', '启用多语言帖子', Boolean(settings.posts_i18n_enabled ?? true))}
-	</div><p class="muted" data-i18n="admin.settings.postsI18nHint">开启后，发帖和编辑时可维护多个语言版本；管理员始终可用。</p>`, 'settings-wide');
+	</div><p class="muted" data-i18n="admin.settings.postsI18nHint">开启后，发帖和编辑时可维护多个语言版本；管理员始终可用。</p>
+	<div class="admin-section-title mt-12"><strong data-i18n="admin.settings.videoEmbeds">视频嵌入</strong><span data-i18n="admin.settings.videoEmbedsDesc">配置允许 iframe 嵌入的视频来源。</span></div>
+	${adminField('admin.settings.videoEmbedDomains', 'iframe 白名单域名', adminTextarea(String(settings.video_embed_domains || 'youtube.com\nyoutu.be\nbilibili.com\nb23.tv'), { id: 'video_embed_domains', rows: 5, maxlength: 4000 }), 'admin.settings.videoEmbedDomainsHint', '每行一个域名。YouTube 和 Bilibili 会自动转为播放器，其他域名会直接放入 iframe；普通视频链接仍使用 video 标签。')}`, 'settings-wide');
 	const oauthProviders = [
 		['google', 'Google'],
 		['github', 'GitHub'],
@@ -2014,7 +2016,7 @@ document.getElementById('save-settings')?.addEventListener('click',async()=>{
 	writeSettingsLocalized();
 	['turnstile_enabled','notify_on_user_delete','notify_on_username_change','notify_on_avatar_change','notify_on_manual_verify','maintenance_enabled','oauth_google_enabled','oauth_github_enabled','oauth_epic_enabled','posts_i18n_enabled'].forEach(k=>body[k]=document.getElementById(k).checked);
 	['site_name','site_tagline','site_icon_url','maintenance_title','maintenance_message','maintenance_until','smtp_host','smtp_port','smtp_user','smtp_pass','smtp_from','smtp_from_name','oauth_google_client_id','oauth_google_client_secret','oauth_github_client_id','oauth_github_client_secret','oauth_epic_client_id','oauth_epic_client_secret'].forEach(k=>body[k]=document.getElementById(k).value);
-	['moderation_posts_default','moderation_comments_default','moderation_default_reject_reason','moderation_reject_reasons','id_codec_secret','visit_log_retention_days','visit_log_max_rows'].forEach(k=>body[k]=document.getElementById(k).value);
+	['moderation_posts_default','moderation_comments_default','moderation_default_reject_reason','moderation_reject_reasons','id_codec_secret','visit_log_retention_days','visit_log_max_rows','video_embed_domains'].forEach(k=>body[k]=document.getElementById(k).value);
 	['reward_checkin_points','reward_checkin_experience','reward_post_points','reward_post_experience','reward_reply_points','reward_reply_experience','reward_post_replied_points','reward_post_replied_experience','level_max','level_base_experience','level_growth_multiplier'].forEach(k=>body[k]=document.getElementById(k).value);
 	body.locale=CONTENT_LOCALE;body.localized=SETTINGS_LOCALIZED;
 	try{await runButton(btn,t('common.processing','处理中...'),async function(done){const res=await fetch('/api/admin/settings',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify(body)});const data=await res.json();if(!res.ok)throw new Error(data.error||t('admin.i18n.saveFailed','保存失败'));done();document.getElementById('settings-message').textContent=t('admin.editor.saved','已保存');});}catch(e){document.getElementById('settings-message').textContent=e.message||String(e);}

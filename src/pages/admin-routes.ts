@@ -677,6 +677,8 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 					oauth_epic_enabled: false,
 					oauth_epic_client_id: '',
 					oauth_epic_client_secret: '',
+					posts_i18n_enabled: true,
+					video_embed_domains: 'youtube.com\nyoutu.be\nbilibili.com\nb23.tv',
 					moderation_posts_default: 'approved',
 					moderation_comments_default: 'approved',
 					moderation_default_reject_reason: '内容不符合社区规则，请修改后重新提交。',
@@ -687,7 +689,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				}
 				for (const row of (settings.results || []) as any[]) {
 					const key = String(row.key);
-					if (key.startsWith('smtp_') || (key.startsWith('maintenance_') && key !== 'maintenance_enabled') || key === 'site_icon_url' || key === 'site_name' || key === 'site_tagline' || key === 'id_codec_secret' || (key.startsWith('oauth_') && (key.endsWith('_client_id') || key.endsWith('_client_secret'))) || key.startsWith('reward_') || key.startsWith('moderation_') || key.startsWith('level_') || key.startsWith('visit_log_')) config[key] = String(row.value || '');
+					if (key.startsWith('smtp_') || (key.startsWith('maintenance_') && key !== 'maintenance_enabled') || key === 'site_icon_url' || key === 'site_name' || key === 'site_tagline' || key === 'id_codec_secret' || key === 'video_embed_domains' || (key.startsWith('oauth_') && (key.endsWith('_client_id') || key.endsWith('_client_secret'))) || key.startsWith('reward_') || key.startsWith('moderation_') || key.startsWith('level_') || key.startsWith('visit_log_')) config[key] = String(row.value || '');
 					else config[key] = row.value === '1';
 				}
 				const [languages, localized] = await Promise.all([

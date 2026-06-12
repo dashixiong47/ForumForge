@@ -1208,6 +1208,7 @@ tick();setInterval(tick,1000);
 			jsonResponse,
 			handleError,
 			apiAdminUser,
+			cache: env.CACHE,
 			authenticateAdminForPath: () => authenticateAdmin(request, adminPermissionForApiPath(url.pathname)),
 			normalizeLocale,
 			saveLocalizedFields,

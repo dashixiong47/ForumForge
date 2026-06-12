@@ -3,6 +3,7 @@ import type { DBCount } from '../db/types';
 import type { UserPayload } from '../core/security';
 import { decodePublicId, publicPostPath } from '../core/id-codec';
 import { DEFAULT_LEVEL_SETTINGS, LEVEL_SETTING_KEYS, normalizeLevelSettings } from '../gamification/progress';
+import { DEFAULT_VIDEO_EMBED_DOMAINS, normalizeVideoEmbedDomains, serializeVideoEmbedDomains } from '../site/markdown';
 import {
 	renderAuthPage,
 	renderHomePage,
@@ -36,6 +37,8 @@ export type SiteRouteContext = {
 	attachTagsToPosts: <T extends { id: number | string }>(posts: T[]) => Promise<Array<T & { tags: Array<{ id: number; name: string }> }>>;
 	applyLocalizedCategoriesToPosts: <T extends { category_id?: number | string | null; category_name?: string | null }>(posts: T[], categories: SiteCategory[]) => T[];
 };
+
+const VIDEO_EMBED_DOMAINS_KV_KEY = 'settings:video_embed_domains';
 
 export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response | null> {
 	const {
@@ -86,6 +89,16 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				return row?.value == null ? fallback : row.value !== '0';
 			};
 			const currentLocale = requestLocale();
+			const getVideoEmbedDomains = async () => {
+				const fallback = DEFAULT_VIDEO_EMBED_DOMAINS;
+				const kv = (env as any)?.CACHE as KVNamespace | undefined;
+				const cached = kv ? await kv.get(VIDEO_EMBED_DOMAINS_KV_KEY).catch(() => null) : null;
+				if (cached != null) return normalizeVideoEmbedDomains(cached);
+				const row = await db.prepare("SELECT value FROM settings WHERE key = 'video_embed_domains'").first<{ value?: string }>().catch(() => null);
+				const serialized = row?.value || serializeVideoEmbedDomains(fallback);
+				if (kv) await kv.put(VIDEO_EMBED_DOMAINS_KV_KEY, serialized, { expirationTtl: 300 }).catch(() => {});
+				return normalizeVideoEmbedDomains(serialized);
+			};
 			const canUsePostI18n = async () => (await settingBool('posts_i18n_enabled', true)) || !!(user && canAdmin(user as any, 'posts'));
 			const localizedPostColumns = (enabled: boolean) => enabled
 				? `posts.*, COALESCE(NULLIF(pt.title, ''), posts.title) as title, COALESCE(NULLIF(pt.content, ''), posts.content) as content,`
@@ -205,6 +218,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					languages: await getEnabledLanguages(),
 					locale: currentLocale,
 					postI18nEnabled: await canUsePostI18n(),
+					videoEmbedDomains: await getVideoEmbedDomains(),
 				}));
 			}
 
@@ -302,6 +316,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					languages: await getEnabledLanguages(),
 					locale: currentLocale,
 					postI18nEnabled: await canUsePostI18n(),
+					videoEmbedDomains: await getVideoEmbedDomains(),
 				}));
 			}
 
@@ -362,6 +377,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					categories,
 					post: postWithTags as unknown as SitePost,
 					comments: (comments.results || []) as any[],
+					videoEmbedDomains: await getVideoEmbedDomains(),
 				}));
 			}
 

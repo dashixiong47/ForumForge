@@ -1,7 +1,10 @@
 import type { DBSetting } from '../db/types';
 import { DEFAULT_LEVEL_SETTINGS, LEVEL_SETTING_KEYS, PROGRESS_REWARD_KEYS } from '../gamification/progress';
+import { DEFAULT_VIDEO_EMBED_DOMAINS, serializeVideoEmbedDomains } from '../site/markdown';
 import type { UserPayload } from '../core/security';
 import type { JsonResponse } from './types';
+
+const VIDEO_EMBED_DOMAINS_KV_KEY = 'settings:video_embed_domains';
 
 export type AdminSettingsApiContext = {
 	request: Request;
@@ -11,6 +14,7 @@ export type AdminSettingsApiContext = {
 	jsonResponse: JsonResponse;
 	handleError: (e: any) => Response;
 	apiAdminUser: UserPayload | null;
+	cache?: KVNamespace;
 	authenticateAdminForPath: () => Promise<UserPayload>;
 	normalizeLocale: (value: unknown) => string;
 	saveLocalizedFields: (scope: string, localized: unknown, allowedFields: string[], fallbacks?: Record<string, string>) => Promise<void>;
@@ -26,6 +30,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 		jsonResponse,
 		handleError,
 		apiAdminUser,
+		cache,
 		authenticateAdminForPath,
 		normalizeLocale,
 		saveLocalizedFields,
@@ -66,6 +71,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 					oauth_epic_client_id: '',
 					oauth_epic_client_secret: '',
 					posts_i18n_enabled: true,
+					video_embed_domains: serializeVideoEmbedDomains(DEFAULT_VIDEO_EMBED_DOMAINS),
 					moderation_posts_default: 'approved',
 					moderation_comments_default: 'approved',
 					moderation_default_reject_reason: '内容不符合社区规则，请修改后重新提交。',
@@ -84,7 +90,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				if (settings.results) {
 					for (const row of settings.results) {
 						const k = row.key as string;
-						if (k.startsWith('smtp_') || (k.startsWith('maintenance_') && k !== 'maintenance_enabled') || k === 'site_icon_url' || k === 'site_name' || k === 'site_tagline' || k === 'id_codec_secret' || k.startsWith('oauth_') && (k.endsWith('_client_id') || k.endsWith('_client_secret')) || k.startsWith('reward_') || k.startsWith('moderation_') || k.startsWith('level_') || k.startsWith('visit_log_')) {
+						if (k.startsWith('smtp_') || (k.startsWith('maintenance_') && k !== 'maintenance_enabled') || k === 'site_icon_url' || k === 'site_name' || k === 'site_tagline' || k === 'id_codec_secret' || k === 'video_embed_domains' || k.startsWith('oauth_') && (k.endsWith('_client_id') || k.endsWith('_client_secret')) || k.startsWith('reward_') || k.startsWith('moderation_') || k.startsWith('level_') || k.startsWith('visit_log_')) {
 							config[k] = (row.value as string) || '';
 						} else {
 							config[k] = row.value === '1';
@@ -106,7 +112,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				const { turnstile_enabled, notify_on_user_delete, notify_on_username_change, notify_on_avatar_change, notify_on_manual_verify,
 					oauth_google_enabled, oauth_github_enabled, oauth_epic_enabled,
 					oauth_google_client_id, oauth_google_client_secret, oauth_github_client_id, oauth_github_client_secret, oauth_epic_client_id, oauth_epic_client_secret,
-					posts_i18n_enabled, site_name, site_tagline, site_icon_url, id_codec_secret, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from, smtp_from_name, maintenance_enabled, maintenance_title, maintenance_message, maintenance_until, moderation_posts_default, moderation_comments_default, moderation_default_reject_reason, moderation_reject_reasons, visit_log_retention_days, visit_log_max_rows } = body;
+					posts_i18n_enabled, video_embed_domains, site_name, site_tagline, site_icon_url, id_codec_secret, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from, smtp_from_name, maintenance_enabled, maintenance_title, maintenance_message, maintenance_until, moderation_posts_default, moderation_comments_default, moderation_default_reject_reason, moderation_reject_reasons, visit_log_retention_days, visit_log_max_rows } = body;
 				
 				const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
 				const batch = [];
@@ -127,6 +133,11 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				if (oauth_github_client_secret !== undefined) batch.push(stmt.bind('oauth_github_client_secret', String(oauth_github_client_secret || '').trim()));
 				if (oauth_epic_client_id !== undefined) batch.push(stmt.bind('oauth_epic_client_id', String(oauth_epic_client_id || '').trim()));
 				if (oauth_epic_client_secret !== undefined) batch.push(stmt.bind('oauth_epic_client_secret', String(oauth_epic_client_secret || '').trim()));
+				let serializedVideoEmbedDomains: string | null = null;
+				if (video_embed_domains !== undefined) {
+					serializedVideoEmbedDomains = serializeVideoEmbedDomains(video_embed_domains).slice(0, 4000);
+					batch.push(stmt.bind('video_embed_domains', serializedVideoEmbedDomains));
+				}
 
 				if (smtp_host !== undefined) batch.push(stmt.bind('smtp_host', smtp_host || ''));
 				if (smtp_port !== undefined) batch.push(stmt.bind('smtp_port', smtp_port || ''));
@@ -167,6 +178,9 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				}
 				
 				if (batch.length > 0) await db.batch(batch);
+				if (serializedVideoEmbedDomains !== null) {
+					await cache?.put(VIDEO_EMBED_DOMAINS_KV_KEY, serializedVideoEmbedDomains, { expirationTtl: 300 }).catch(() => {});
+				}
 				if (body.localized && typeof body.localized === 'object') {
 					const locale = normalizeLocale(body.locale) || 'zh-CN';
 					const localized = body.localized as Record<string, Record<string, string>>;

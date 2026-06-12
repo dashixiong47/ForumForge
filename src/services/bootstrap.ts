@@ -112,6 +112,7 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 				db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('site_name', 'ForumForge')"),
 				db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('site_tagline', 'Media-first discussion hub')"),
 				db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('site_icon_url', ?)").bind(FORUMFORGE_ICON_DATA_URL),
+				db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_embed_domains', 'youtube.com\nyoutu.be\nbilibili.com\nb23.tv')"),
 				db.prepare("UPDATE settings SET value = ? WHERE key = 'site_icon_url' AND (value IS NULL OR value = '')").bind(FORUMFORGE_ICON_DATA_URL),
 				db.prepare("INSERT OR IGNORE INTO categories (id, name, description, hero_title, hero_description) VALUES (1, 'Announcements', 'Official updates and release notes.', 'Announcements', 'Official updates, releases, and site news.')"),
 				db.prepare("INSERT OR IGNORE INTO categories (id, name, description, hero_title, hero_description) VALUES (2, 'Build Logs', 'Progress notes for projects and plugins.', 'Build Logs', 'Track implementation notes and release progress.')"),
