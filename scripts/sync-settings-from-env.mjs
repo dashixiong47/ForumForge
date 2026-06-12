@@ -58,11 +58,6 @@ for (const provider of ['google', 'github', 'epic']) {
 	const clientSecret = env[`${upper}_CLIENT_SECRET`];
 	addSetting(settings, `oauth_${provider}_client_id`, clientId);
 	addSetting(settings, `oauth_${provider}_client_secret`, clientSecret);
-	if (clientId && clientSecret) settings[`oauth_${provider}_enabled`] = '1';
-}
-
-if (env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
-	settings.turnstile_enabled = '1';
 }
 
 const entries = Object.entries(settings);
