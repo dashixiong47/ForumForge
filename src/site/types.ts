@@ -101,6 +101,7 @@ export interface SiteNotification {
 	is_read?: number;
 	created_at?: string;
 	url?: string;
+	target_url?: string;
 }
 
 export type PageState = {

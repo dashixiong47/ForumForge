@@ -918,10 +918,14 @@ export function renderMyContentPage(options: {
 		<div class="comment-body">${escapeHtml(comment.content)}</div>
 		${String(comment.status || '') === 'rejected' ? `<div class="status-note rejected"><strong data-i18n="me.rejectReason">拒绝理由</strong><span>${rejectReasonNote(comment.rejection_reason)}</span></div>` : ''}
 	</article>`).join('') || '<div class="panel-body muted" data-i18n="me.emptyComments">你还没有发表评论。</div>';
-	const notifications = (options.notifications || []).map((item) => `<a class="compact-item notif-row ${Number(item.is_read || 0) ? '' : 'unread'}" href="${attr(item.url || (item.post_id ? publicPostPath(item.post_id, options.env) : '/me'))}">
-		<div class="compact-item-head"><span class="compact-item-title">${escapeHtml(item.title)}</span><span class="pill">${escapeHtml(dateText(item.created_at))}</span></div>
-		<p class="post-excerpt no-margin">${escapeHtml(item.body || '')}</p>
-	</a>`).join('') || '<div class="panel-body muted" data-i18n="notifications.empty">暂无消息</div>';
+	const notifications = (options.notifications || []).map((item) => {
+		const targetUrl = item.target_url || (item.post_id ? `${publicPostPath(item.post_id, options.env)}${item.comment_id ? `#comment-${item.comment_id}` : ''}` : '');
+		return `<article id="notification-${item.id}" class="compact-item notif-row ${Number(item.is_read || 0) ? '' : 'unread'}">
+			<div class="compact-item-head"><a class="compact-item-title" href="${attr(item.url || `/me?tab=notifications#notification-${item.id}`)}">${escapeHtml(item.title)}</a><span class="pill">${escapeHtml(dateText(item.created_at))}</span></div>
+			<p class="post-excerpt no-margin">${escapeHtml(item.body || '')}</p>
+			${targetUrl ? `<div class="toolbar toolbar-end"><a class="btn ghost btn-compact" href="${attr(targetUrl)}" data-i18n="notifications.viewTarget">查看关联内容</a></div>` : ''}
+		</article>`;
+	}).join('') || '<div class="panel-body muted" data-i18n="notifications.empty">暂无消息</div>';
 	const sourceMeta = (source: string) => {
 		if (source === 'checkin') return { key: 'me.progressSource.checkin', text: '签到' };
 		if (source === 'create_post') return { key: 'me.progressSource.createPost', text: '发帖' };

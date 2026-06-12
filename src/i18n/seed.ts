@@ -233,6 +233,7 @@ export const BUILTIN_TRANSLATIONS: Array<{ key: string; zh: string; en: string }
 	{ key: 'settings.passwordSaved', zh: '密码已设置。', en: 'Password saved.' },
 	{ key: 'notifications.loading', zh: '加载中...', en: 'Loading...' },
 	{ key: 'notifications.empty', zh: '暂无消息', en: 'No notifications' },
+	{ key: 'notifications.viewTarget', zh: '查看关联内容', en: 'View related content' },
 	{ key: 'compose.sampleText', zh: '文本', en: 'Text' },
 	{ key: 'compose.headingText', zh: '标题', en: 'Heading' },
 	{ key: 'compose.quoteText', zh: '引用内容', en: 'Quote text' },

@@ -165,7 +165,8 @@ export async function handleUserApi(ctx: UserApiContext): Promise<Response | nul
 			]);
 			const items = ((itemsRes.results || []) as any[]).map((item) => ({
 				...item,
-				url: item.post_id ? `${publicPostPath(item.post_id, runtimeEnvForLinks)}${item.comment_id ? `#comment-${item.comment_id}` : ''}` : '/me'
+				target_url: item.post_id ? `${publicPostPath(item.post_id, runtimeEnvForLinks)}${item.comment_id ? `#comment-${item.comment_id}` : ''}` : '',
+				url: `/me?tab=notifications#notification-${item.id}`
 			}));
 			return jsonResponse({ items, unread_count: Number(unreadRow?.count || 0) });
 		} catch (e) {

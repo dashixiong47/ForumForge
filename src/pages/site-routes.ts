@@ -149,7 +149,8 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const drafts = await attachTagsToPosts(applyLocalizedCategoriesToPosts((draftsRes.results || []) as any[], categories));
 				const notifications = ((notificationsRes.results || []) as any[]).map((item) => ({
 					...item,
-					url: item.post_id ? `${publicPostPath(item.post_id, env)}${item.comment_id ? `#comment-${item.comment_id}` : ''}` : '/me',
+					url: `/me?tab=notifications#notification-${item.id}`,
+					target_url: item.post_id ? `${publicPostPath(item.post_id, env)}${item.comment_id ? `#comment-${item.comment_id}` : ''}` : '',
 				}));
 				return siteHtmlResponse(renderMyContentPage({
 					user,
