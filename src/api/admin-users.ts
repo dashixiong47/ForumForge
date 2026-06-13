@@ -143,10 +143,11 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 			const exists = await db.prepare('SELECT role FROM role_permissions WHERE role = ?').bind(role).first<{ role: string }>();
 			if (exists) return jsonResponse({ error: 'Role already exists' }, 409);
 			const permissions = normalizePermissions(body.permissions || []);
-			await db.prepare(
-				`INSERT INTO role_permissions (role, permissions, updated_at)
-				 VALUES (?, ?, CURRENT_TIMESTAMP)`
-			).bind(role, JSON.stringify(permissions)).run();
+			await db.batch([
+				db.prepare(`INSERT INTO role_permissions (role, permissions, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`).bind(role, JSON.stringify(permissions)),
+				db.prepare("INSERT OR IGNORE INTO translations (scope, key, locale, value) VALUES (?, 'name', 'zh-CN', ?)").bind('role:' + role, role),
+				db.prepare("INSERT OR IGNORE INTO translations (scope, key, locale, value) VALUES (?, 'name', 'en-US', ?)").bind('role:' + role, role),
+			]);
 			await security.logAudit(userPayload.id, 'CREATE_ROLE', 'role', role, { permissions }, request);
 			return jsonResponse({ success: true, role, permissions }, 201);
 		} catch (e) {
@@ -184,9 +185,13 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 			const userPayload = await adminUser();
 			if (!role) return jsonResponse({ error: 'Invalid role' }, 400);
 			if (isBuiltinRole(role)) return jsonResponse({ error: 'Built-in roles cannot be deleted' }, 400);
+			if (role === 'admin') return jsonResponse({ error: 'Admin role is locked' }, 400);
 			const countRow = await db.prepare('SELECT COUNT(*) AS count FROM users WHERE role = ?').bind(role).first<DBCount>();
 			if ((countRow?.count || 0) > 0) return jsonResponse({ error: 'Role still has users' }, 400);
-			await db.prepare('DELETE FROM role_permissions WHERE role = ?').bind(role).run();
+			await db.batch([
+				db.prepare('DELETE FROM role_permissions WHERE role = ?').bind(role),
+				db.prepare("DELETE FROM translations WHERE scope = ? AND key = 'name'").bind('role:' + role),
+			]);
 			await security.logAudit(userPayload.id, 'DELETE_ROLE', 'role', role, {}, request);
 			return jsonResponse({ success: true });
 		} catch (e) {

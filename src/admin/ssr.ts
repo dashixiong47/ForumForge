@@ -430,8 +430,8 @@ async function renderWorldMap(map,countryData,text,muted,green){
 		var maxCountry=Math.max.apply(null,[1].concat(countryData.map(function(i){return i.value||0;})));
 		map.setOption({
 			backgroundColor:'transparent',
-			tooltip:{trigger:'item',backgroundColor:'#0d141d',borderColor:'rgba(88,166,255,.35)',textStyle:{color:text},formatter:function(p){var d=p.data||{};return (d.code?d.code+' · ':'')+p.name+'<br/>'+Number(d.value||0)+' visits';}},
-			visualMap:{min:0,max:maxCountry,left:18,bottom:18,text:['High','Low'],textStyle:{color:muted},inRange:{color:['#102033','#1f6feb','#3fb950']},calculable:true,itemWidth:12,itemHeight:96},
+			tooltip:{trigger:'item',backgroundColor:'#0d141d',borderColor:'rgba(88,166,255,.35)',textStyle:{color:text},formatter:function(p){var d=p.data||{};return (d.code?d.code+' · ':'')+p.name+'<br/>'+Number(d.value||0)+' '+t('admin.dashboard.chartVisits','访问量');}},
+			visualMap:{min:0,max:maxCountry,left:18,bottom:18,text:[t('admin.dashboard.mapHigh','高'),t('admin.dashboard.mapLow','低')],textStyle:{color:muted},inRange:{color:['#102033','#1f6feb','#3fb950']},calculable:true,itemWidth:12,itemHeight:96},
 			toolbox:{show:false,feature:{restore:{}}},
 			geo:{map:'world',roam:true,zoom:1.05,left:18,right:18,top:18,bottom:18,label:{show:false},emphasis:{label:{show:false},itemStyle:{areaColor:'#1f6feb'}},itemStyle:{areaColor:'#141f2d',borderColor:'rgba(120,145,175,.32)',borderWidth:.6}},
 			series:[
@@ -460,13 +460,13 @@ function initDashboard(){
 		week.setOption({
 			backgroundColor:'transparent',
 			tooltip:{trigger:'axis',backgroundColor:'#0d141d',borderColor:'rgba(88,166,255,.35)',textStyle:{color:text}},
-			legend:{top:8,right:12,textStyle:{color:muted},data:['Visits','Visitors']},
+			legend:{top:8,right:12,textStyle:{color:muted},data:[t('admin.dashboard.chartVisits','访问量'),t('admin.dashboard.chartVisitors','独立访客')]},
 			grid:{left:42,right:26,top:48,bottom:34,containLabel:true},
 			xAxis:{type:'category',data:(dashboardData.days||[]).map(function(day){return day.slice(5);}),axisLine:{lineStyle:{color:grid}},axisLabel:{color:muted}},
 			yAxis:{type:'value',splitLine:{lineStyle:{color:grid}},axisLabel:{color:muted}},
 			series:[
-				{name:'Visits',type:'line',smooth:true,symbolSize:8,lineStyle:{width:3,color:blue},areaStyle:{color:makeGradient('rgba(88,166,255,.28)','rgba(88,166,255,0)')},data:visits},
-				{name:'Visitors',type:'bar',barWidth:18,itemStyle:{borderRadius:[5,5,0,0],color:makeGradient('rgba(63,185,80,.78)','rgba(63,185,80,.22)')},data:visitors}
+				{name:t('admin.dashboard.chartVisits','访问量'),type:'line',smooth:true,symbolSize:8,lineStyle:{width:3,color:blue},areaStyle:{color:makeGradient('rgba(88,166,255,.28)','rgba(88,166,255,0)')},data:visits},
+				{name:t('admin.dashboard.chartVisitors','独立访客'),type:'bar',barWidth:18,itemStyle:{borderRadius:[5,5,0,0],color:makeGradient('rgba(63,185,80,.78)','rgba(63,185,80,.22)')},data:visitors}
 			]
 		});
 	}
@@ -1268,12 +1268,24 @@ export function renderAdminPosts(user: UserPayload, data: { posts: any[]; catego
 		const id = escapeHtml(row.id);
 		const categoryId = row.category_id ?? '';
 		const excerpt = String(row.content || '').replace(/[#*_>`\[\]()!-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 130);
-		const status = row.is_pinned ? 'global-pinned' : row.is_category_pinned ? 'category-pinned' : 'normal';
-		const statusBadge = row.is_pinned
+		const postStatus = String(row.status || 'approved');
+		const status = postStatus === 'draft' ? 'draft'
+			: postStatus === 'pending' ? 'pending'
+			: postStatus === 'rejected' ? 'rejected'
+			: row.is_pinned ? 'global-pinned'
+			: row.is_category_pinned ? 'category-pinned'
+			: 'normal';
+		const statusBadge = postStatus === 'draft'
+			? '<span class="badge" data-i18n="post.draft">草稿</span>'
+			: postStatus === 'pending'
+			? '<span class="badge badge-warn" data-i18n="admin.status.pending">待审核</span>'
+			: postStatus === 'rejected'
+			? '<span class="badge badge-err" data-i18n="admin.status.rejected">已拒绝</span>'
+			: row.is_pinned
 			? '<span class="badge badge-ok" data-i18n="post.globalPinned">全局置顶</span>'
 			: row.is_category_pinned
-				? '<span class="badge badge-info" data-i18n="post.categoryPinned">分类置顶</span>'
-				: '<span class="badge badge-off" data-i18n="admin.status.normal">普通</span>';
+			? '<span class="badge badge-info" data-i18n="post.categoryPinned">分类置顶</span>'
+			: '<span class="badge badge-off" data-i18n="admin.status.normal">普通</span>';
 		return `<tr data-row data-category="${escapeHtml(categoryId)}" data-status="${status}" data-search="${escapeHtml(`${row.id} ${row.title} ${row.username} ${row.category_name || ''} ${excerpt}`)}">
 			<td class="admin-check"><input type="checkbox" data-post-check value="${id}"></td>
 			<td class="admin-title-cell">
@@ -1298,7 +1310,7 @@ export function renderAdminPosts(user: UserPayload, data: { posts: any[]; catego
 	const toolbar = adminToolbar(`
 		${adminInput({ id: 'admin-search', 'data-i18n-placeholder': 'admin.common.searchPlaceholder', placeholder: '搜索...' })}
 		${adminSelect(`<option value="" data-i18n="admin.posts.allCategories">全部分类</option>${(data.categories || []).map((category) => `<option value="${escapeHtml(category.id)}">${escapeHtml(category.name || '')}</option>`).join('')}`, { id: 'post-category-filter' })}
-		${adminSelect('<option value="" data-i18n="admin.posts.allStatus">全部状态</option><option value="global-pinned" data-i18n="post.globalPinned">全局置顶</option><option value="category-pinned" data-i18n="post.categoryPinned">分类置顶</option><option value="normal" data-i18n="admin.status.normal">普通</option>', { id: 'post-status-filter' })}
+		${adminSelect('<option value="" data-i18n="admin.posts.allStatus">全部状态</option><option value="draft" data-i18n="post.draft">草稿</option><option value="pending" data-i18n="admin.status.pending">待审核</option><option value="rejected" data-i18n="admin.status.rejected">已拒绝</option><option value="global-pinned" data-i18n="post.globalPinned">全局置顶</option><option value="category-pinned" data-i18n="post.categoryPinned">分类置顶</option><option value="normal" data-i18n="admin.status.normal">普通</option>', { id: 'post-status-filter' })}
 		${adminButton('admin.posts.bulkDelete', '批量删除', { id: 'post-bulk-delete' }, 'btn-danger')}
 	`);
 	const table = adminTableShell(
@@ -1426,9 +1438,10 @@ document.addEventListener('click',async function(e){
 	});
 }
 
-export function renderAdminPermissions(user: UserPayload, data: { roles: Array<{ role: string; permissions: string[]; user_count?: number }> }): string {
+export function renderAdminPermissions(user: UserPayload, data: { roles: Array<{ role: string; permissions: string[]; user_count?: number }>; roleNames?: Record<string, Record<string, string>> }): string {
 	const roles = data.roles || [];
-	const builtinRoles = new Set(['admin', 'manager', 'moderator', 'user']);
+	const roleNames = data.roleNames || {};
+	const builtinRoles = new Set(['admin', 'user']);
 	const permissionGroups = [
 		{ title: '内容管理', titleKey: 'admin.permissions.groupContent', desc: '帖子、评论、审核与媒体资源。', descKey: 'admin.permissions.groupContentDesc', keys: ['posts', 'comments', 'moderation', 'media'] },
 		{ title: '站点结构', titleKey: 'admin.permissions.groupStructure', desc: '分类、标签和站点配置。', descKey: 'admin.permissions.groupStructureDesc', keys: ['categories', 'tags', 'settings'] },
@@ -1440,8 +1453,9 @@ export function renderAdminPermissions(user: UserPayload, data: { roles: Array<{
 		const selected = new Set(role.permissions || []);
 		const active = index === 0 ? ' active' : '';
 		const permissionCount = locked ? adminPermissionOptions.length : selected.size;
+		const displayName = (roleNames[role.role]?.['zh-CN'] || roleNames[role.role]?.['en-US'] || role.role);
 		return `<button type="button" class="role-pill${active}" data-role-tab="${escapeHtml(role.role)}">
-			<span><strong>${escapeHtml(role.role)}</strong><small>${Number(role.user_count || 0)} users</small></span>
+			<span><strong>${escapeHtml(displayName)}</strong><small>${Number(role.user_count || 0)} <span data-i18n="admin.stats.users">用户</span></small></span>
 			<em>${locked ? 'Full' : `${permissionCount}/${adminPermissionOptions.length}`}</em>
 		</button>`;
 	}).join('');
@@ -1465,9 +1479,10 @@ export function renderAdminPermissions(user: UserPayload, data: { roles: Array<{
 				<div class="permission-toggle-grid">${toggles}</div>
 			</section>`;
 		}).join('');
+		const panelName = (roleNames[role.role]?.['zh-CN'] || roleNames[role.role]?.['en-US'] || role.role);
 		return `<div class="role-panel${index === 0 ? ' active' : ''}" data-role-panel="${escapeHtml(role.role)}">
 			<div class="role-panel-head">
-				<div><h2>${escapeHtml(role.role)}</h2><p data-i18n="${locked ? 'admin.permissions.lockedHint' : 'admin.permissions.editHint'}">${locked ? '系统管理员固定拥有全部权限。' : '勾选该角色可以访问的后台模块。'}</p></div>
+				<div><h2>${escapeHtml(panelName)}<small style="margin-left:8px;font-size:14px;color:var(--muted);font-weight:400">${escapeHtml(role.role)}</small></h2><p data-i18n="${locked ? 'admin.permissions.lockedHint' : 'admin.permissions.editHint'}">${locked ? '系统管理员固定拥有全部权限。' : '勾选该角色可以访问的后台模块。'}</p></div>
 				<div class="admin-row-actions">${locked ? `<span class="badge badge-ok" data-i18n="admin.permissions.locked">管理员角色拥有全部权限</span>` : `${builtin ? `<span class="badge" data-i18n="admin.permissions.builtinRole">内置角色</span>` : adminButton('admin.permissions.deleteRole', '删除角色', { class: 'btn-sm', 'data-delete-role': role.role }, 'btn-danger')}${adminButton('admin.common.save', '保存', { 'data-save-role': role.role }, 'btn-primary')}`}</div>
 			</div>
 			${groups}

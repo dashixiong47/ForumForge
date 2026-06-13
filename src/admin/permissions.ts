@@ -73,7 +73,7 @@ export function sanitizeRole(value: unknown): string {
 }
 
 export function isBuiltinRole(role: string): boolean {
-	return ['admin', 'manager', 'moderator', 'user'].includes(role);
+	return ['admin', 'user'].includes(role);
 }
 
 export function normalizePermissions(value: unknown): AdminPermissionKey[] {

@@ -131,7 +131,10 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const body = await request.json() as any;
 				const manifestUrl = String(body.url || '').trim();
 				if (!/^https?:\/\//i.test(manifestUrl)) return jsonResponse({ error: 'Invalid manifest URL' }, 400);
-				const response = await fetch(manifestUrl, { headers: { Accept: 'application/json' } });
+				const response = await fetch(manifestUrl, {
+					headers: { Accept: 'application/json' },
+					signal: AbortSignal.timeout(5000),
+				});
 				if (!response.ok) return jsonResponse({ error: `Fetch failed: ${response.status}` }, 400);
 				const raw = await response.json();
 				const result = normalizePluginManifest({ ...(raw as any), sourceUrl: manifestUrl });
@@ -149,34 +152,33 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const { results } = await db.prepare(
 					"SELECT id, slug, name, version, source_url FROM plugins WHERE source_url IS NOT NULL AND source_url != '' ORDER BY name ASC"
 				).all();
-				const updates = [];
-				for (const row of ((results || []) as unknown as DBPlugin[])) {
-					try {
-						const response = await fetch(row.source_url || '', { headers: { Accept: 'application/json' } });
-						if (!response.ok) {
-							updates.push({ id: row.id, name: row.name, ok: false, error: `HTTP ${response.status}` });
-							continue;
+				const rows = (results || []) as unknown as DBPlugin[];
+				const updates = await Promise.all(
+					rows.map(async (row) => {
+						try {
+							const response = await fetch(row.source_url || '', {
+								headers: { Accept: 'application/json' },
+								signal: AbortSignal.timeout(5000),
+							});
+							if (!response.ok) return { id: row.id, name: row.name, ok: false, error: `HTTP ${response.status}` };
+							const raw = await response.json();
+							const normalized = normalizePluginManifest({ ...(raw as any), sourceUrl: row.source_url });
+							if (!normalized.ok) return { id: row.id, name: row.name, ok: false, error: normalized.error };
+							const remote = normalized.manifest;
+							return {
+								id: row.id,
+								name: row.name,
+								ok: true,
+								currentVersion: row.version || '0.0.0',
+								remoteVersion: remote.version || '0.0.0',
+								hasUpdate: comparePluginVersion(remote.version, row.version) > 0,
+								sourceUrl: row.source_url,
+							};
+						} catch (error: any) {
+							return { id: row.id, name: row.name, ok: false, error: String(error?.message || error) };
 						}
-						const raw = await response.json();
-						const normalized = normalizePluginManifest({ ...(raw as any), sourceUrl: row.source_url });
-						if (!normalized.ok) {
-							updates.push({ id: row.id, name: row.name, ok: false, error: normalized.error });
-							continue;
-						}
-						const remote = normalized.manifest;
-						updates.push({
-							id: row.id,
-							name: row.name,
-							ok: true,
-							currentVersion: row.version || '0.0.0',
-							remoteVersion: remote.version || '0.0.0',
-							hasUpdate: comparePluginVersion(remote.version, row.version) > 0,
-							sourceUrl: row.source_url,
-						});
-					} catch (error: any) {
-						updates.push({ id: row.id, name: row.name, ok: false, error: String(error?.message || error) });
-					}
-				}
+					}),
+				);
 				return jsonResponse({ updates });
 			} catch (e) {
 				return handleError(e);
@@ -191,7 +193,10 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const existing = await db.prepare('SELECT * FROM plugins WHERE id = ?').bind(id).first<DBPlugin>();
 				if (!existing) return jsonResponse({ error: 'Plugin not found' }, 404);
 				if (!existing.source_url) return jsonResponse({ error: 'Plugin has no source URL' }, 400);
-				const response = await fetch(existing.source_url, { headers: { Accept: 'application/json' } });
+				const response = await fetch(existing.source_url, {
+					headers: { Accept: 'application/json' },
+					signal: AbortSignal.timeout(5000),
+				});
 				if (!response.ok) return jsonResponse({ error: `Fetch failed: ${response.status}` }, 400);
 				const raw = await response.json();
 				const result = normalizePluginManifest({

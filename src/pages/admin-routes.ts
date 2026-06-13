@@ -527,14 +527,33 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 			}
 
 			if (url.pathname === '/admin/permissions') {
-				const [roleRows, userRows] = await Promise.all([
+				const builtinRoleDefaults: Record<string, Record<string, string>> = {
+					admin: { 'zh-CN': '管理员', 'en-US': 'Admin' },
+					manager: { 'zh-CN': '管理者', 'en-US': 'Manager' },
+					moderator: { 'zh-CN': '版主', 'en-US': 'Moderator' },
+					user: { 'zh-CN': '用户', 'en-US': 'User' },
+				};
+				const seedStmts = Object.entries(builtinRoleDefaults).flatMap(([roleKey, names]) =>
+					Object.entries(names).map(([locale, value]) =>
+						db.prepare("INSERT OR IGNORE INTO translations (scope, key, locale, value) VALUES (?, 'name', ?, ?)").bind('role:' + roleKey, locale, value),
+					),
+				);
+				await db.batch(seedStmts).catch(() => {});
+				const [roleRows, userRows, translationRows] = await Promise.all([
 					db.prepare('SELECT role, permissions FROM role_permissions').all(),
 					db.prepare('SELECT role FROM users').all(),
+					db.prepare("SELECT scope, locale, value FROM translations WHERE scope LIKE 'role:%' AND key = 'name'").all(),
 				]);
 				const counts = new Map<string, number>();
 				for (const item of (userRows.results || []) as any[]) {
 					const role = normalizeRole(item.role);
 					counts.set(role, (counts.get(role) || 0) + 1);
+				}
+				const roleNamesMap: Record<string, Record<string, string>> = {};
+				for (const row of (translationRows.results || []) as any[]) {
+					const roleKey = String(row.scope || '').replace(/^role:/, '');
+					if (!roleNamesMap[roleKey]) roleNamesMap[roleKey] = {};
+					roleNamesMap[roleKey][String(row.locale)] = String(row.value || '');
 				}
 				const order = new Map([['admin', 1], ['manager', 2], ['moderator', 3], ['user', 4]]);
 				const roles = ((roleRows.results || []) as any[])
@@ -544,7 +563,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 						user_count: counts.get(normalizeRole(row.role)) || 0,
 					}))
 					.sort((a, b) => (order.get(a.role) || 9) - (order.get(b.role) || 9) || a.role.localeCompare(b.role));
-				return adminHtmlResponse(renderAdminPermissions(userPayload, { roles }));
+				return adminHtmlResponse(renderAdminPermissions(userPayload, { roles, roleNames: roleNamesMap }));
 			}
 
 			if (url.pathname === '/admin/posts') {
@@ -555,7 +574,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				const fallbackLocale = locale === 'en-US' ? 'zh-CN' : 'en-US';
 				const [posts, categories, countRow] = await Promise.all([
 					db.prepare(
-					`SELECT p.id, p.title, p.content, p.created_at, p.view_count, p.is_pinned, p.is_category_pinned, p.category_id, p.author_id,
+					`SELECT p.id, p.title, p.content, p.created_at, p.view_count, p.is_pinned, p.is_category_pinned, p.category_id, p.author_id, p.status,
 					        u.username,
 					        COALESCE(ct.value, cf.value, c.name) AS category_name,
 					        COUNT(cm.id) AS comment_count
