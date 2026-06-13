@@ -574,7 +574,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				const fallbackLocale = locale === 'en-US' ? 'zh-CN' : 'en-US';
 				const [posts, categories, countRow] = await Promise.all([
 					db.prepare(
-					`SELECT p.id, p.title, p.content, p.created_at, p.view_count, p.is_pinned, p.is_category_pinned, p.category_id, p.author_id, p.status,
+					`SELECT p.id, COALESCE(pt.value, pf.value, p.title) AS title, p.content, p.created_at, p.view_count, p.is_pinned, p.is_category_pinned, p.category_id, p.author_id, p.status,
 					        u.username,
 					        COALESCE(ct.value, cf.value, c.name) AS category_name,
 					        COUNT(cm.id) AS comment_count
@@ -583,11 +583,13 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 					   LEFT JOIN categories c ON c.id = p.category_id
 					   LEFT JOIN translations ct ON ct.scope = ('category:' || c.id) AND ct.key = 'name' AND ct.locale = ?
 					   LEFT JOIN translations cf ON cf.scope = ('category:' || c.id) AND cf.key = 'name' AND cf.locale = ?
+					   LEFT JOIN translations pt ON pt.scope = ('post:' || p.id) AND pt.key = 'title' AND pt.locale = ?
+					   LEFT JOIN translations pf ON pf.scope = ('post:' || p.id) AND pf.key = 'title' AND pf.locale = ?
 					   LEFT JOIN comments cm ON cm.post_id = p.id
 					  GROUP BY p.id
 					  ORDER BY p.created_at DESC
 					  LIMIT ? OFFSET ?`
-					).bind(locale, fallbackLocale, pageSize, offset).all(),
+					).bind(locale, fallbackLocale, locale, fallbackLocale, pageSize, offset).all(),
 					db.prepare(
 						`SELECT c.id, COALESCE(ct.value, cf.value, c.name) AS name
 						   FROM categories c
