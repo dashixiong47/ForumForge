@@ -63,12 +63,39 @@ type CacheEntry<T> = {
 
 const readCache = new Map<string, CacheEntry<unknown>>();
 
+// Seed env-var-only secrets into DB on first request per isolate (INSERT OR IGNORE = never overwrites user-set values)
+let envSeeded = false;
+const ENV_SEED_KEYS: Array<[string, keyof Env]> = [
+	['turnstile_site_key', 'TURNSTILE_SITE_KEY'],
+	['turnstile_secret_key', 'TURNSTILE_SECRET_KEY'],
+];
+async function seedEnvToDb(db: D1Database, env: Env): Promise<void> {
+	const stmts = ENV_SEED_KEYS
+		.filter(([, envKey]) => env[envKey])
+		.map(([dbKey, envKey]) =>
+			db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').bind(dbKey, String(env[envKey])),
+		);
+	if (stmts.length > 0) await db.batch(stmts);
+}
+
 async function cachedRead<T>(key: string, loader: () => Promise<T>, ttlMs = READ_CACHE_TTL_MS): Promise<T> {
 	const now = Date.now();
 	const cached = readCache.get(key) as CacheEntry<T> | undefined;
 	if (cached && cached.expiresAt > now) return cached.value;
 	const value = await loader();
-	if (readCache.size > 512) readCache.clear();
+	if (readCache.size >= 512) {
+		// Evict expired entries first; if still over limit, drop the oldest 25%
+		const evictCount = Math.ceil(readCache.size / 4);
+		const byAge = [...readCache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+		let removed = 0;
+		for (const [k, v] of byAge) {
+			if (v.expiresAt <= now || removed < evictCount) {
+				readCache.delete(k);
+				removed++;
+			}
+			if (removed >= evictCount && v.expiresAt > now) break;
+		}
+	}
 	readCache.set(key, { expiresAt: now + ttlMs, value });
 	return value;
 }
@@ -100,6 +127,11 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const method = request.method;
+
+		if (!envSeeded) {
+			envSeeded = true;
+			ctx.waitUntil(seedEnvToDb(env.DB, env).catch(() => {}));
+		}
 
 		if (url.pathname === '/assets/maps/world.json' && (method === 'GET' || method === 'HEAD')) {
 			const mapHeaders = {
@@ -252,9 +284,25 @@ export default {
 			return url.origin;
 		};
 
-		// CORS headers helper
-		const corsHeaders = {
-			'Access-Control-Allow-Origin': '*',
+		// Security headers applied to all responses
+		const securityHeaders: Record<string, string> = {
+			'X-Content-Type-Options': 'nosniff',
+			'X-Frame-Options': 'SAMEORIGIN',
+			'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+		};
+
+		// CORS: restrict to the same origin (and localhost for dev)
+		const requestOrigin = request.headers.get('Origin') || '';
+		const baseOrigin = getBaseUrl().replace(/\/$/, '');
+		const allowedOrigin =
+			requestOrigin === baseOrigin ||
+			/^https?:\/\/localhost(:\d+)?$/.test(requestOrigin) ||
+			/^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(requestOrigin)
+				? requestOrigin
+				: baseOrigin;
+		const corsHeaders: Record<string, string> = {
+			...securityHeaders,
+			'Access-Control-Allow-Origin': allowedOrigin,
 			'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS, DELETE, PUT',
 			'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Timestamp, X-Nonce',
 		};
@@ -1201,6 +1249,7 @@ tick();setInterval(tick,1000);
 			url,
 			method,
 			db,
+			env: env as unknown as Record<string, unknown>,
 			jsonResponse,
 			handleError,
 			apiAdminUser,
@@ -1214,12 +1263,15 @@ tick();setInterval(tick,1000);
 
 		const checkTurnstile = async (reqBody: any, ip: string) => {
 			if (isLocalRequest(url)) return true;
-			const setting = await db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first<DBSetting>();
-			const dbEnabled = setting && setting.value === '1';
-			const siteKey = (env as any).TURNSTILE_SITE_KEY;
-			const secretKey = (env as any).TURNSTILE_SECRET_KEY;
-			const fullyConfigured = dbEnabled && siteKey && secretKey;
-			if (!fullyConfigured) return true;
+			const [enabledRow, siteKeyRow, secretKeyRow] = await Promise.all([
+				db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first<DBSetting>(),
+				db.prepare("SELECT value FROM settings WHERE key = 'turnstile_site_key'").first<DBSetting>(),
+				db.prepare("SELECT value FROM settings WHERE key = 'turnstile_secret_key'").first<DBSetting>(),
+			]);
+			const dbEnabled = enabledRow && enabledRow.value === '1';
+			const siteKey = siteKeyRow?.value || (env as any).TURNSTILE_SITE_KEY || '';
+			const secretKey = secretKeyRow?.value || (env as any).TURNSTILE_SECRET_KEY || '';
+			if (!dbEnabled || !siteKey || !secretKey) return true;
 			const token = reqBody['cf-turnstile-response'];
 			if (!token) return false;
 			return verifyTurnstile(token, ip, secretKey);
@@ -1248,7 +1300,7 @@ tick();setInterval(tick,1000);
 			const rlPath = url.pathname;
 			if (rlPath === '/api/login' || rlPath === '/api/register' || rlPath === '/api/auth/forgot-password') {
 				const limit = rlPath === '/api/register' ? 5 : 20;
-				const allowed = await kvCheckRateLimit(kv, `${rlPath}:${ip}`, limit, 60).catch(() => true);
+				const allowed = await kvCheckRateLimit(kv, `${rlPath}:${ip}`, limit, 60).catch(() => false);
 				if (!allowed) return jsonResponse({ error: 'Too many requests, please try again later.' }, 429);
 			}
 		}

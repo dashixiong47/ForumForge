@@ -1,10 +1,11 @@
 import type { Security, UserPayload } from '../core/security';
 import type { DBCount, DBSetting, DBUser, DBUserEmail } from '../db/types';
 import { isBuiltinRole, normalizePermissions, sanitizeRole } from '../admin/permissions';
-import { hashPassword, generateToken } from '../core/password';
+import { hashPassword, hashPasswordSimple, generateToken, clampIterations, PBKDF2_DEFAULT } from '../core/password';
 import { hasControlCharacters, hasInvisibleCharacters, hasRestrictedKeywords, isVisuallyEmpty } from '../core/validation';
 import { sendEmail } from '../integrations/smtp';
 import { deleteImage, type S3Env } from '../integrations/s3';
+import { escapeHtml } from '../utils/html';
 import { extractImageUrls } from '../utils/media';
 import { generateIdenticon } from '../utils/identicon';
 import type { JsonResponse } from './types';
@@ -51,7 +52,14 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 			if (password && (password.length < 8 || password.length > 64)) return jsonResponse({ error: 'Password must be 8-64 characters' }, 400);
 
 			if (password) {
-				const hash = await hashPassword(password);
+				const [pbkdf2EnabledRow, iterRow] = await Promise.all([
+					db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_enabled'").first<{ value: string }>(),
+					db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_iterations'").first<{ value: string }>(),
+				]);
+				const pbkdf2On = pbkdf2EnabledRow?.value !== '0';
+				const hash = pbkdf2On
+					? await hashPassword(password, clampIterations(parseInt(iterRow?.value || '') || PBKDF2_DEFAULT))
+					: await hashPasswordSimple(password);
 				await db.prepare('UPDATE users SET password = ? WHERE id = ?').bind(hash, id).run();
 			}
 			if (email) {
@@ -110,7 +118,7 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 					if (user) {
 						const emailHtml = `
 							<h1>用户名已修改</h1>
-							<p>您的用户名已被管理员修改为 <strong>${username}</strong>。</p>
+							<p>您的用户名已被管理员修改为 <strong>${escapeHtml(username)}</strong>。</p>
 							<p>如有疑问，请联系管理员。</p>
 						`;
 						executionCtx.waitUntil(sendEmail(user.email, '您的用户名已修改', emailHtml, env).catch(console.error));
@@ -248,7 +256,13 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 				return jsonResponse({ error: 'Username already taken' }, 409);
 			}
 
-			const passwordHash = await hashPassword(password);
+			const [pbkdf2EnabledRowC, iterRowC] = await Promise.all([
+					db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_enabled'").first<{ value: string }>(),
+					db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_iterations'").first<{ value: string }>(),
+				]);
+				const passwordHash = pbkdf2EnabledRowC?.value !== '0'
+					? await hashPassword(password, clampIterations(parseInt(iterRowC?.value || '') || PBKDF2_DEFAULT))
+					: await hashPasswordSimple(password);
 			const token = verified ? null : generateToken();
 			const result = await db.prepare(
 				'INSERT INTO users (email, username, password, role, permissions, verified, verification_token, nickname) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'

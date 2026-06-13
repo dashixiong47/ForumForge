@@ -45,6 +45,9 @@ export function siteHtmlResponse(html: string, status = 200, headers?: HeadersIn
 		headers: {
 			'Content-Type': 'text/html; charset=utf-8',
 			'Cache-Control': 'no-store',
+			'X-Content-Type-Options': 'nosniff',
+			'X-Frame-Options': 'SAMEORIGIN',
+			'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
 			...(headers || {}),
 		},
 	});
@@ -172,8 +175,8 @@ function likeButton(post: SitePost): string {
 function appScript(): string {
 	return `
 function nonceHeaders(json){const h={'X-Timestamp':String(Math.floor(Date.now()/1000)),'X-Nonce':crypto.randomUUID()};if(json)h['Content-Type']='application/json';return h;}
-async function api(url, options){const res=await fetch(url,options);const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||siteT('common.requestFailed','请求失败'));return data;}
-function showMessage(text,type){const el=document.querySelector('[data-message]');if(!el)return;el.textContent=text||'';el.dataset.type=type||'';}
+async function api(url, options){const res=await fetch(url,options);const data=await res.json().catch(()=>({}));if(!res.ok){const err=new Error(data.error||siteT('common.requestFailed','请求失败'));err.data=data;throw err;}return data;}
+let _toastCss=0;function showMessage(text,type){if(!text)return;if(!_toastCss){_toastCss=1;const s=document.createElement('style');s.textContent='#ff-toasts{position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column-reverse;gap:8px;pointer-events:none;max-width:360px}#ff-toasts .tt{pointer-events:auto;padding:11px 15px;border-radius:10px;border:1px solid;font-size:13px;font-weight:600;line-height:1.4;box-shadow:0 8px 32px rgba(0,0,0,.45);animation:tt-in .2s ease}#ff-toasts .tt.ok{background:#0d2a14;border-color:#238636;color:#3fb950}#ff-toasts .tt.error{background:#2a0d0d;border-color:#da3633;color:#f85149}#ff-toasts .tt.info{background:#111b2b;border-color:#30363d;color:#e6edf3}@keyframes tt-in{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}';document.head.appendChild(s);}let c=document.getElementById('ff-toasts');if(!c){c=document.createElement('div');c.id='ff-toasts';document.body.appendChild(c);}const el=document.createElement('div');el.className='tt '+(type==='ok'?'ok':type==='error'?'error':'info');el.textContent=text;c.appendChild(el);setTimeout(()=>el.remove(),4000);}
 function escapeHtmlClient(text){return String(text||'').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function cookieLocale(){const m=document.cookie.match(/(?:^|; )ff_locale=([^;]+)/);return m?decodeURIComponent(m[1]):'';}
 function normalizeClientLocale(value){const raw=String(value||'').trim().replace('_','-');const low=raw.toLowerCase();if(!raw)return '';if(low==='zh'||low==='zh-cn'||low==='zh-hans')return 'zh-CN';if(low==='en'||low==='en-us')return 'en-US';const parts=raw.split('-');return parts[1]?parts[0].toLowerCase()+'-'+parts[1].toUpperCase():parts[0].toLowerCase();}
@@ -489,21 +492,19 @@ async function ensureTurnstile(form){
  if(!cfg.turnstile_enabled||!cfg.turnstile_site_key)return {};
  await new Promise((resolve,reject)=>{
   if(window.turnstile)return resolve();
-  if(document.querySelector('script[data-turnstile-api]')){let n=0;const timer=setInterval(()=>{if(window.turnstile){clearInterval(timer);resolve();}else if(++n>80){clearInterval(timer);reject(new Error('Turnstile loading timeout'));}},100);return;}
+  if(document.querySelector('script[data-turnstile-api]')){let n=0;const t=setInterval(()=>{if(window.turnstile){clearInterval(t);resolve();}else if(++n>80){clearInterval(t);reject(new Error('Turnstile loading timeout'));}},100);return;}
   const s=document.createElement('script');s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';s.async=true;s.defer=true;s.dataset.turnstileApi='1';s.onload=resolve;s.onerror=()=>reject(new Error('Turnstile failed to load'));document.head.appendChild(s);
  });
  const holder=form.querySelector('[data-turnstile]');
  holder.hidden=false;
- if(!holder.dataset.widgetId){holder.dataset.widgetId=turnstile.render(holder,{sitekey:cfg.turnstile_site_key,theme:'dark'});}
- let token=turnstile.getResponse(holder.dataset.widgetId);
- if(!token){
-  token=await new Promise((resolve,reject)=>{
-   turnstile.reset(holder.dataset.widgetId);
-   turnstile.remove(holder.dataset.widgetId);
-   holder.dataset.widgetId=turnstile.render(holder,{sitekey:cfg.turnstile_site_key,theme:'dark',callback:resolve,'error-callback':()=>reject(new Error('Turnstile verification failed'))});
-   setTimeout(()=>reject(new Error('Turnstile verification timeout')),120000);
-  });
- }
+ // Reuse an existing fresh token without re-rendering
+ if(holder.dataset.widgetId){const existing=turnstile.getResponse(holder.dataset.widgetId);if(existing)return {'cf-turnstile-response':existing};}
+ // Render once with callback — avoids the double-render caused by no-callback first render
+ const token=await new Promise((resolve,reject)=>{
+  if(holder.dataset.widgetId){try{turnstile.remove(holder.dataset.widgetId);}catch(e){}}
+  holder.dataset.widgetId=turnstile.render(holder,{sitekey:cfg.turnstile_site_key,theme:'dark',callback:resolve,'error-callback':()=>reject(new Error('Turnstile verification failed'))});
+  setTimeout(()=>reject(new Error('Turnstile verification timeout')),120000);
+ });
  return {'cf-turnstile-response':token};
 }
 document.addEventListener('submit',async(e)=>{
@@ -524,10 +525,20 @@ document.addEventListener('submit',async(e)=>{
    showMessage(data.message||siteT('auth.registerDone','注册成功，已完成邮箱验证。'),'ok'); keepLoading=true; setTimeout(()=>{location.href=data.redirect||'/';},500); return;
   }
   if(action==='forgot'){
-   await api('/api/auth/forgot-password',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify({email:form.email.value,locale:SITE_LOCALE})});
-   showMessage(siteT('auth.forgotSent','如果邮箱存在，重置链接会发送到该邮箱。'),'ok'); return;
+   const startForgotCd=(sec)=>{keepLoading=true;let _fl=sec;submit.disabled=true;submit.textContent=siteT('auth.forgotResendIn','重新发送')+'('+_fl+'s)';const _ft=setInterval(()=>{_fl--;submit.textContent=siteT('auth.forgotResendIn','重新发送')+'('+_fl+'s)';if(_fl<=0){clearInterval(_ft);submit.disabled=false;submit.textContent=siteT('auth.forgot','找回密码');}},1000);};
+   try{
+    await api('/api/auth/forgot-password',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify({email:form.email.value,locale:SITE_LOCALE,...turnstilePayload})});
+    showMessage(siteT('auth.forgotSent','如果邮箱存在，重置链接会发送到该邮箱。'),'ok');
+    startForgotCd(60);
+   }catch(err){
+    const cd=Number(err.data?.cooldown||0);
+    if(cd>0){startForgotCd(cd);showMessage(err.message||String(err),'error');}
+    else throw err;
+   }
+   return;
   }
   if(action==='reset'){
+   if(form.password.value!==form.password_confirm.value){showMessage(siteT('auth.passwordMismatch','两次输入的密码不一致。'),'error');return;}
    await api('/api/auth/reset-password',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify({token:form.token.value,password:form.password.value})});
    showMessage(siteT('auth.resetDone','密码已重置，请登录。'),'ok'); keepLoading=true; location.href='/login'; return;
   }
@@ -589,7 +600,7 @@ document.addEventListener('click',async(e)=>{
    form?.code?.focus();
    startRegisterCodeCountdown(registerCode);
    done(siteT('auth.codeSent','已发送'));
-  });}catch(err){showMessage(err.message||String(err),'error');}
+  });}catch(err){const cd=Number(err.data?.cooldown||0);if(cd>0)startRegisterCodeCountdown(registerCode,cd);showMessage(err.message||String(err),'error');}
   return;
  }
  const notif=e.target.closest('[data-notification-toggle]'); if(notif){const root=notif.closest('.notifications');root?.classList.toggle('open');if(root?.classList.contains('open'))loadNotifications(true);return;}
@@ -654,9 +665,9 @@ function startEmailCodeCountdown(){
  },1000);
 }
 let _registerCodeTimer=null;
-function startRegisterCodeCountdown(btn){
+function startRegisterCodeCountdown(btn,initial){
  if(_registerCodeTimer)clearInterval(_registerCodeTimer);
- let left=60;
+ let left=initial||60;
  btn.disabled=true;
  btn.textContent=siteT('auth.resendCodeIn','重新发送')+'('+left+'s)';
  _registerCodeTimer=setInterval(()=>{
@@ -1329,6 +1340,8 @@ export function renderNewPostPage(options: {
 .compose-editor textarea[name="content"]{flex:1;width:100%;min-height:0;height:100%;resize:none}
 @media(max-width:900px){.form-shell .compose-head{align-items:flex-start;flex-direction:column}.compose-head-right{width:100%;justify-content:space-between;margin-left:0}.compose-language{min-width:0}.compose-lang-select{min-width:120px;max-width:48vw}}
 </style>`;
+	const maxTitleLength = Math.max(10, Math.min(500, Number((options as any).maxTitleLength || 100)));
+	const maxContentLength = Math.max(100, Math.min(100000, Number((options as any).maxContentLength || 3000)));
 	return renderSiteLayout({
 		title: modeTitle,
 		user: options.user,
@@ -1338,8 +1351,8 @@ export function renderNewPostPage(options: {
 		fixed: true,
 		videoEmbedDomains: options.videoEmbedDomains,
 		body: `${composeStyle}<form data-action="post" class="form-shell">${post ? `<input type="hidden" name="post_id" value="${post.id}">` : ''}
-			<section class="panel compose-sidebar"><h2 data-i18n="compose.info">帖子信息</h2><div class="panel-body"><div class="field"><label data-i18n="compose.title">标题</label><input name="title" maxlength="100" data-i18n-placeholder="compose.titlePlaceholder" placeholder="输入帖子标题..." value="${attr(initialTitle)}" required></div><div class="field"><label data-i18n="compose.category">分类</label><select name="category_id">${categoryOptions}</select></div><div class="field"><label data-i18n="compose.tags">标签</label><div class="tag-checks">${tagOptions}</div></div><div class="field access-fields"><label data-i18n="compose.accessControl">等级权限</label><div class="level-input-row"><label><span data-i18n="compose.minViewLevel">查看等级</span><input name="min_view_level" type="number" min="0" max="999" value="${minViewLevel}"></label><label><span data-i18n="compose.minCommentLevel">评论等级</span><input name="min_comment_level" type="number" min="0" max="999" value="${minCommentLevel}"></label></div><small class="muted" data-i18n="compose.levelHint">0 表示不限制；作者和管理员不受限制。</small></div>${verifyNotice}<div class="field"><label data-i18n="compose.media">媒体</label><label class="upload-card ${emailVerified ? '' : 'is-disabled'}"><input type="file" accept="image/*,video/*" data-upload data-target="textarea[name=content]" ${emailVerified ? '' : 'disabled'} hidden><span class="upload-icon">${toolbarIcon('upload')}</span><strong data-i18n="compose.uploadMedia">上传媒体</strong><small data-i18n="compose.mediaHint">上传后会自动插入 Markdown，支持图文混排和视频。</small></label></div><div class="message" data-message></div></div></section>
-			<section class="panel compose-editor"><div class="compose-head"><h2 data-i18n="compose.content">内容</h2><div class="compose-head-right">${languageSwitch}<div class="content-count"><span data-i18n="compose.contentCount">正文长度</span><span id="compose-content-count">${initialContent.length}</span><span>/3000</span></div></div></div><div class="md-toolbar" aria-label="Markdown toolbar">
+			<section class="panel compose-sidebar"><h2 data-i18n="compose.info">帖子信息</h2><div class="panel-body"><div class="field"><label data-i18n="compose.title">标题</label><input name="title" maxlength="${maxTitleLength}" data-count-target="#compose-title-count" data-i18n-placeholder="compose.titlePlaceholder" placeholder="输入帖子标题..." value="${attr(initialTitle)}" required><div class="content-count" style="justify-content:flex-end;margin-top:4px"><span id="compose-title-count">${initialTitle.length}</span><span>/${maxTitleLength}</span></div></div><div class="field"><label data-i18n="compose.category">分类</label><select name="category_id">${categoryOptions}</select></div><div class="field"><label data-i18n="compose.tags">标签</label><div class="tag-checks">${tagOptions}</div></div><div class="field access-fields"><label data-i18n="compose.accessControl">等级权限</label><div class="level-input-row"><label><span data-i18n="compose.minViewLevel">查看等级</span><input name="min_view_level" type="number" min="0" max="999" value="${minViewLevel}"></label><label><span data-i18n="compose.minCommentLevel">评论等级</span><input name="min_comment_level" type="number" min="0" max="999" value="${minCommentLevel}"></label></div><small class="muted" data-i18n="compose.levelHint">0 表示不限制；作者和管理员不受限制。</small></div>${verifyNotice}<div class="field"><label data-i18n="compose.media">媒体</label><label class="upload-card ${emailVerified ? '' : 'is-disabled'}"><input type="file" accept="image/*,video/*" data-upload data-target="textarea[name=content]" ${emailVerified ? '' : 'disabled'} hidden><span class="upload-icon">${toolbarIcon('upload')}</span><strong data-i18n="compose.uploadMedia">上传媒体</strong><small data-i18n="compose.mediaHint">上传后会自动插入 Markdown，支持图文混排和视频。</small></label></div></div></section>
+			<section class="panel compose-editor"><div class="compose-head"><h2 data-i18n="compose.content">内容</h2><div class="compose-head-right">${languageSwitch}<div class="content-count"><span data-i18n="compose.contentCount">正文长度</span><span id="compose-content-count">${initialContent.length}</span><span>/${maxContentLength}</span></div></div></div><div class="md-toolbar" aria-label="Markdown toolbar">
 				${mdTool('bold', 'Bold', 'bold', 'compose.toolbar.bold')}
 				${mdTool('italic', 'Italic', 'italic', 'compose.toolbar.italic')}
 				${mdTool('strike', 'Strike', 'strike', 'compose.toolbar.strike')}
@@ -1355,7 +1368,7 @@ export function renderNewPostPage(options: {
 				${mdTool('video', 'Video', 'video', 'compose.toolbar.video')}
 				${mdTool('code', 'Code', 'code', 'compose.toolbar.code')}
 				${mdTool('codeblock', 'Code block', 'codeblock', 'compose.toolbar.codeblock')}
-			</div><div class="panel-body"><div class="field"><textarea name="content" maxlength="3000" required data-count-target="#compose-content-count" data-preview-source="[data-live-preview]" data-i18n-placeholder="compose.contentPlaceholder" placeholder="支持 Markdown，可直接混排文字、图片和视频...">${escapeHtml(initialContent)}</textarea></div></div></section>
+			</div><div class="panel-body"><div class="field"><textarea name="content" maxlength="${maxContentLength}" required data-count-target="#compose-content-count" data-preview-source="[data-live-preview]" data-i18n-placeholder="compose.contentPlaceholder" placeholder="支持 Markdown，可直接混排文字、图片和视频...">${escapeHtml(initialContent)}</textarea></div></div></section>
 			<section class="panel compose-preview"><h2 data-i18n="compose.preview">预览</h2>${post ? renderPostArticleHtml(initialContent, { videoEmbedDomains: options.videoEmbedDomains }) : renderPostArticleHtml('', { videoEmbedDomains: options.videoEmbedDomains, emptyHtml: '<span class="muted" data-i18n="compose.previewEmpty">预览会在发布后按 Markdown 渲染。</span>' })}<div class="panel-body"><div class="toolbar toolbar-end"><a class="btn" href="${post ? publicPostPath(post.id, options.env) : '/'}" data-i18n="common.cancel">取消</a>${showDraftButton ? `<button class="btn" type="submit" formnovalidate data-draft="1" ${emailVerified ? '' : 'disabled'} data-i18n="compose.saveDraft">保存草稿</button>` : ''}<button class="btn primary" type="submit" ${emailVerified ? '' : 'disabled'} data-i18n="${post ? 'compose.save' : 'index.newPost'}">${post ? '保存修改' : '发布帖子'}</button></div></div></section>
 		</form>`,
 	});
@@ -1381,7 +1394,7 @@ export function renderAuthPage(kind: 'login' | 'register' | 'forgot' | 'reset', 
 				? `<div class="field"><label data-i18n="auth.email">邮箱</label><input name="email" type="email" autocomplete="email" required></div><div class="field"><label data-i18n="auth.password">密码</label><input name="password" type="password" minlength="8" maxlength="16" required><small data-i18n="auth.passwordRule">8-16 个字符。</small></div><div class="field auth-verify-field"><label data-i18n="auth.verificationCode">验证码</label><div class="auth-verify-row"><input class="auth-code-input" name="code" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="______" required><button class="mini-btn" type="button" data-register-send-code data-i18n="auth.sendCode">发送验证码</button></div><small class="auth-verify-hint" data-i18n="auth.registerCodeHint">验证码会发送到邮箱，10 分钟内有效。</small></div>`
 				: kind === 'forgot'
 				? `<div class="field"><label data-i18n="auth.email">邮箱</label><input name="email" type="email" required></div>`
-				: `<input type="hidden" name="token" value="${attr(token)}"><div class="field"><label data-i18n="auth.newPassword">新密码</label><input name="password" type="password" required></div>`;
+				: `<input type="hidden" name="token" value="${attr(token)}"><div class="field"><label data-i18n="auth.newPassword">新密码</label><input name="password" type="password" minlength="8" maxlength="64" required></div><div class="field"><label data-i18n="auth.confirmPassword">确认密码</label><input name="password_confirm" type="password" minlength="8" maxlength="64" required></div>`;
 	return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1391,13 +1404,16 @@ export function renderAuthPage(kind: 'login' | 'register' | 'forgot' | 'reset', 
 	${faviconLinks(brandOptions)}
 	<style>
 :root{color-scheme:dark;--bg:#0d1117;--panel:#0f1624;--panel2:#111b2b;--border:#263244;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--danger:#f85149;--font:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}*{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:var(--font);font-size:14px;color:var(--text);background:radial-gradient(circle at 50% 12%,rgba(88,166,255,.12),transparent 34%),linear-gradient(180deg,#0d1117,#090d14);overflow:hidden}a{color:#9ecbff;text-decoration:none}button,input{font:inherit;color:inherit}.auth-shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);padding:18px}.auth-top{display:flex;align-items:center;gap:10px}.brand{display:flex;align-items:center;gap:9px;font-weight:900;min-width:0}.brand span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.brand-mark{width:24px;height:24px;border:1px solid rgba(88,166,255,.42);border-radius:7px;display:grid;place-items:center;color:#9ecbff;background:rgba(88,166,255,.09);font-size:12px;overflow:hidden;flex:0 0 auto}.brand-mark img{width:100%;height:100%;object-fit:cover;display:block}.spacer{flex:1}.lang-picker{position:relative}.lang-btn{height:34px;border:1px solid var(--border);border-radius:999px;background:#101827;color:var(--text);padding:0 11px;display:flex;align-items:center;gap:7px;font-weight:800}.lang-btn>svg{opacity:.55}.lang-flag{display:inline-grid;place-items:center;width:22px;height:22px;font-size:15px;line-height:1}.lang-flag svg{width:20px;height:14px;border-radius:3px;box-shadow:0 0 0 1px rgba(255,255,255,.12)}.lang-menu{position:absolute;right:0;top:calc(100% + 8px);min-width:210px;margin:0;padding:7px;list-style:none;border:1px solid var(--border);border-radius:12px;background:#111827;box-shadow:0 24px 70px rgba(0,0,0,.5);display:none}.lang-menu.open{display:grid;gap:3px}.lang-menu li{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:8px;align-items:center;padding:8px 9px;border-radius:8px;cursor:pointer}.lang-menu li:hover,.lang-menu li.active{background:rgba(88,166,255,.11);color:#9ecbff}.lang-menu small{color:var(--muted)}.auth-main{min-height:0;display:grid;place-items:center}.auth-card{width:min(430px,calc(100vw - 36px));border:1px solid rgba(96,120,150,.28);border-radius:16px;background:linear-gradient(180deg,rgba(17,27,43,.96),rgba(11,17,29,.96));box-shadow:0 24px 80px rgba(0,0,0,.38);padding:28px}.auth-card h1{margin:0 0 22px;font-size:28px}.field{display:grid;gap:7px;margin-bottom:14px}.field label{font-weight:800;color:#d8e2f1}.field input{width:100%;height:42px;border:1px solid var(--border);border-radius:10px;background:#0b111d;padding:0 12px;outline:none}.field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,.14)}.field small{color:var(--muted);line-height:1.35}.auth-verify-field{width:max-content;max-width:100%;margin-top:4px;border:1px solid rgba(88,166,255,.22);border-radius:14px;background:linear-gradient(135deg,rgba(88,166,255,.08),rgba(16,24,38,.72));padding:12px 13px;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.auth-verify-title{margin-bottom:8px}.auth-verify-title label{font-size:13px;color:#e6edf3}.auth-verify-row{display:grid;grid-template-columns:142px 122px;gap:8px;align-items:center}.auth-verify-hint{display:block;margin-top:8px;font-size:12px;max-width:272px}.mini-btn{height:40px;border:1px solid rgba(88,166,255,.44);border-radius:10px;background:rgba(88,166,255,.12);color:#cfe6ff;font-weight:900;cursor:pointer;white-space:nowrap;padding:0 12px}.mini-btn:hover{background:rgba(88,166,255,.2);border-color:rgba(88,166,255,.72)}.mini-btn:disabled{opacity:.62;cursor:not-allowed}.auth-code-input{height:40px!important;letter-spacing:.32em!important;text-align:center!important;font-weight:900!important;font-family:Consolas,"Cascadia Code",monospace!important;font-size:17px!important}.turnstile-box{display:flex;justify-content:center;margin:10px 0}.turnstile-box[hidden]{display:none!important}.btn{width:100%;height:44px;border:1px solid var(--accent);border-radius:10px;background:var(--accent);color:#fff;font-weight:900;cursor:pointer}.btn:hover{filter:brightness(1.08)}.oauth-auth{display:grid;gap:10px;margin-top:16px}.oauth-divider{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px}.oauth-divider:before,.oauth-divider:after{content:"";height:1px;background:var(--border);flex:1}.oauth-icon-row{display:flex;align-items:center;justify-content:center;gap:12px}.oauth-icon-btn{width:48px;height:48px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(180deg,#101827,#0b111d);color:#dbe7f7;display:grid;place-items:center;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);transition:.15s}.oauth-icon-btn:hover{transform:translateY(-1px);border-color:rgba(88,166,255,.58);background:rgba(88,166,255,.1);box-shadow:0 10px 28px rgba(0,0,0,.28),0 0 0 3px rgba(88,166,255,.1)}.oauth-icon-btn svg,.oauth-icon-btn img{width:22px;height:22px;display:block;object-fit:contain}.oauth-icon-btn span{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:linear-gradient(135deg,#182235,#26344d);color:#9ecbff;font-weight:950}.message{min-height:22px;margin-top:12px;color:var(--muted)}.message.ok{color:#3fb950}.message.error{color:var(--danger)}.auth-links{margin:14px 0 0;color:var(--muted);text-align:center}.auth-links a{margin:0 7px}@media(max-width:520px){.auth-verify-field{width:100%}.auth-verify-row{grid-template-columns:1fr}.mini-btn{width:100%}.auth-verify-hint{max-width:none}}
-	.auth-verify-field{width:100%;margin:4px 0 16px;border:0;background:transparent;padding:0;box-shadow:none;justify-items:end}
-	.auth-verify-field>label{display:flex;align-items:center;gap:7px;width:min(286px,100%);margin-bottom:8px;font-size:13px;color:#e6edf3}
-	.auth-verify-field>label:before{content:"";width:8px;height:8px;border-radius:999px;background:linear-gradient(135deg,#58a6ff,#3fb950);box-shadow:0 0 12px rgba(88,166,255,.55)}
+	.auth-verify-field{width:100%;margin:4px 0 16px;border:0;background:transparent;padding:0;box-shadow:none}
+	.auth-verify-field>label{display:flex;align-items:center;gap:8px;width:100%;margin-bottom:10px;font-size:13px;color:#e6edf3;font-weight:700}
+	.auth-verify-field>label:before{content:"";width:8px;height:8px;flex:0 0 auto;border-radius:999px;background:linear-gradient(135deg,#58a6ff,#3fb950);box-shadow:0 0 12px rgba(88,166,255,.55)}
 	.auth-verify-title{display:none}
-	.auth-verify-row{display:grid;grid-template-columns:136px 142px;gap:8px;align-items:center;width:min(286px,100%)}
-	.auth-verify-hint{display:block;width:min(286px,100%);margin-top:7px;font-size:12px;max-width:286px}
-	@media(max-width:520px){.auth-verify-field{justify-items:stretch}.auth-verify-field>label,.auth-verify-row,.auth-verify-hint{width:100%}.auth-verify-row{grid-template-columns:1fr}}
+	.auth-verify-row{display:flex;gap:10px;align-items:stretch;width:100%}
+	.auth-code-input{flex:1;min-width:0;height:42px!important;font-size:20px!important;letter-spacing:.42em!important;text-align:center!important;font-weight:900!important;font-family:Consolas,"Cascadia Code",monospace!important;border:1.5px solid rgba(88,166,255,.35)!important;border-radius:10px!important;background:rgba(88,166,255,.05)!important;padding:0 8px!important}
+	.auth-code-input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px rgba(88,166,255,.16)!important;background:rgba(88,166,255,.08)!important}
+	.mini-btn{flex:0 0 auto;width:108px;height:42px;border-radius:10px}
+	.auth-verify-hint{display:block;width:100%;margin-top:8px;font-size:12px}
+	@media(max-width:520px){.auth-verify-row{flex-direction:column}.mini-btn{width:100%;height:44px}}
 	</style>
 </head>
 <body>
@@ -1414,10 +1430,9 @@ export function renderAuthPage(kind: 'login' | 'register' | 'forgot' | 'reset', 
 			<form class="auth-card" data-action="${kind}">
 				<h1 data-i18n="${keyMap[kind]}">${titleMap[kind]}</h1>
 				${fields}
-				${kind === 'login' || kind === 'register' ? '<div class="turnstile-box" data-turnstile hidden></div>' : ''}
+				${kind === 'login' || kind === 'register' || kind === 'forgot' ? '<div class="turnstile-box" data-turnstile hidden></div>' : ''}
 				<button class="btn" type="submit" data-i18n="${keyMap[kind]}">${titleMap[kind]}</button>
 				${oauthButtons}
-				<div class="message" data-message></div>
 				<p class="auth-links"><a href="/login" data-i18n="auth.login">登录</a><a href="/register" data-i18n="auth.register">注册</a><a href="/forgot" data-i18n="auth.forgotLink">忘记密码</a></p>
 			</form>
 		</main>
@@ -1531,7 +1546,7 @@ export function renderSettingsPageSite(options: { user: SiteUser; categories: Si
 					</div></section>
 				</div>
 			</main>
-			<div class="toolbar settings-save"><div class="message" data-message></div><button class="btn primary" type="submit" data-i18n="common.save">保存资料设置</button></div>
+			<div class="toolbar settings-save"><button class="btn primary" type="submit" data-i18n="common.save">保存资料设置</button></div>
 		</form><form id="set-password-form" data-action="set-password"></form>`,
 	});
 }

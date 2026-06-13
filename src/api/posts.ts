@@ -100,11 +100,17 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		return { title: rawTitle, content: rawContent };
 	};
 
-	const validatePostText = (title: string, content: string) => {
+	const validatePostText = async (title: string, content: string) => {
 		if (hasInvisibleCharacters(title) || hasInvisibleCharacters(content)) return 'Title or content contains invalid invisible characters';
-		if (title.length > 100) return 'Title too long (Max 100 chars)';
-		if (content.length > 3000) return 'Content too long (Max 3000 chars)';
 		if (hasControlCharacters(title) || hasControlCharacters(content)) return 'Title or content contains invalid control characters';
+		const [maxTitleRow, maxContentRow] = await Promise.all([
+			db.prepare("SELECT value FROM settings WHERE key = 'max_title_length'").first<{ value: string }>(),
+			db.prepare("SELECT value FROM settings WHERE key = 'max_content_length'").first<{ value: string }>(),
+		]);
+		const maxTitle = Math.max(10, Math.min(500, parseInt(maxTitleRow?.value || '') || 100));
+		const maxContent = Math.max(100, Math.min(100000, parseInt(maxContentRow?.value || '') || 3000));
+		if (title.length > maxTitle) return `Title too long (Max ${maxTitle} chars)`;
+		if (content.length > maxContent) return `Content too long (Max ${maxContent} chars)`;
 		return '';
 	};
 
@@ -147,11 +153,11 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		return Array.from(map.values()).slice(0, 20);
 	};
 
-	const validatePostTranslations = (body: any, title: string, content: string, enabled: boolean) => {
+	const validatePostTranslations = async (body: any, title: string, content: string, enabled: boolean) => {
 		if (!enabled) return '';
 		for (const item of collectPostTranslations(body, title, content)) {
 			if (isVisuallyEmpty(item.title) && isVisuallyEmpty(item.content)) continue;
-			const error = validatePostText(item.title || title, item.content || content);
+			const error = await validatePostText(item.title || title, item.content || content);
 			if (error) return error;
 		}
 		return '';
@@ -339,10 +345,10 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const minCommentLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_comment_level || 0) || 0)));
 			const tagIds = parseTagIds(body.tag_ids);
 
-			const textError = validatePostText(title, content);
+			const textError = await validatePostText(title, content);
 			if (textError) return jsonResponse({ error: textError }, 400);
 			const i18nEnabled = await postsI18nEnabledFor(userPayload);
-			const translationsError = validatePostTranslations(body, title, content, i18nEnabled);
+			const translationsError = await validatePostTranslations(body, title, content, i18nEnabled);
 			if (translationsError) return jsonResponse({ error: translationsError }, 400);
 
 			const post = await db.prepare('SELECT author_id, status, rejection_reason FROM posts WHERE id = ?').bind(postId).first<any>();
@@ -392,7 +398,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			if (Number(post.author_id) !== Number(userPayload.id) && !isAdminEdit) return jsonResponse({ error: 'Unauthorized' }, 403);
 			const normalized = normalizePostInput({ title: post.title, content: post.content }, false);
 			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
-			const textError = validatePostText(normalized.title, normalized.content);
+			const textError = await validatePostText(normalized.title, normalized.content);
 			if (textError) return jsonResponse({ error: textError }, 400);
 			if (post.category_id) {
 				const category = await db.prepare('SELECT id FROM categories WHERE id = ? AND COALESCE(enabled, 1) = 1 AND (? = 1 OR COALESCE(admin_only, 0) = 0)').bind(post.category_id, isAdminEdit ? 1 : 0).first();
@@ -570,10 +576,10 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const minViewLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_view_level || 0) || 0)));
 			const minCommentLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_comment_level || 0) || 0)));
 			const tagIds = parseTagIds(body.tag_ids);
-			const textError = validatePostText(title, content);
+			const textError = await validatePostText(title, content);
 			if (textError) return jsonResponse({ error: textError }, 400);
 			const i18nEnabled = await postsI18nEnabledFor(userPayload);
-			const translationsError = validatePostTranslations(body, title, content, i18nEnabled);
+			const translationsError = await validatePostTranslations(body, title, content, i18nEnabled);
 			if (translationsError) return jsonResponse({ error: translationsError }, 400);
 
 			if (category_id) {

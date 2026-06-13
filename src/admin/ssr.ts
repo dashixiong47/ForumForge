@@ -2,7 +2,7 @@ import type { UserPayload } from '../core/security';
 import { publicPostPath } from '../core/id-codec';
 import { FORUMFORGE_ICON_DATA_URL } from '../assets/brand';
 import { escapeHtml, jsonScript } from '../utils/html';
-import { adminButton, adminField, adminInput, adminMetricCard, adminMiniTable, adminPager, adminPanel, adminSelect, adminSwitch, adminTableShell, adminTextarea, adminToolbar, icon, tr } from './ui';
+import { adminButton, adminField, adminInput, adminPasswordInput, adminMetricCard, adminMiniTable, adminPager, adminPanel, adminSelect, adminSwitch, adminTableShell, adminTextarea, adminToolbar, icon, tr } from './ui';
 import { contentLanguageSelector, languageCode, localeCatalog, localizedValue, normalizeContentLanguages, type AdminLanguage, type LocalizedValueMap } from './localization';
 
 type AdminNavKey = 'dashboard' | 'posts' | 'comments' | 'moderation' | 'users' | 'permissions' | 'categories' | 'tags' | 'media' | 'plugins' | 'translations' | 'logs' | 'settings';
@@ -1805,11 +1805,24 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 		${adminField('admin.settings.visitLogMaxRows', '最大行数', adminInput({ id: 'visit_log_max_rows', class: 'reward-input', type: 'number', min: 0, max: 10000000, step: 1000, value: settings.visit_log_max_rows ?? 100000 }), 'admin.settings.visitLogMaxRowsHint', '0 表示不按行数清理。')}
 	</div>`;
 	const idCodecField = `<div class="admin-section-title mt-12"><strong data-i18n="admin.settings.idCodec">URL 编码密钥</strong><span data-i18n="admin.settings.idCodecDesc">用于隐藏公开 URL 中的数字 ID，留空则使用环境变量。</span></div>
-	${adminField('admin.settings.idCodecSecret', '编码密钥', adminInput({ id: 'id_codec_secret', type: 'password', autocomplete: 'new-password', value: settings.id_codec_secret || '', placeholder: '至少 16 个字符' }), 'admin.settings.idCodecSecretHint', '上线后修改会让旧编码链接失效；旧数字链接仍兼容。')}`;
-	const notifyPanelWithLogs = adminPanel('admin.settings.securityNotifications', '安全与通知', 'admin.settings.securityNotificationsDesc', '控制验证、管理操作通知和访问日志保留。', `<div class="settings-toggle-grid">${rows}</div>${idCodecField}${logRetentionFields}`);
+	${adminField('admin.settings.idCodecSecret', '编码密钥', adminPasswordInput({ id: 'id_codec_secret', autocomplete: 'new-password', value: settings.id_codec_secret || '', placeholder: '至少 16 个字符' }), 'admin.settings.idCodecSecretHint', '上线后修改会让旧编码链接失效；旧数字链接仍兼容。')}`;
+	const turnstileFields = `<div class="admin-section-title mt-12"><strong data-i18n="admin.settings.turnstileKeys">Turnstile 密钥</strong><span data-i18n="admin.settings.turnstileKeysDesc">在此配置后无需设置环境变量，留空则回退到环境变量。</span></div>
+	<div class="grid cols-2">
+		${adminField('admin.settings.turnstileSiteKey', 'Site Key', adminPasswordInput({ id: 'turnstile_site_key', value: settings.turnstile_site_key || '', autocomplete: 'off', placeholder: '0x4AAAAAAA...' }))}
+		${adminField('admin.settings.turnstileSecretKey', 'Secret Key', adminPasswordInput({ id: 'turnstile_secret_key', value: settings.turnstile_secret_key || '', autocomplete: 'new-password', placeholder: '0x4AAAAAAA...' }))}
+	</div>`;
+	const pbkdf2Field = `<div class="admin-section-title mt-12"><strong data-i18n="admin.settings.pbkdf2">密码哈希强度</strong><span data-i18n="admin.settings.pbkdf2Desc">PBKDF2 是安全的慢速哈希算法，越高越安全但登录越慢，Cloudflare Workers 上限 100000。禁用后改用 SHA-256（快速但较弱）。</span></div>
+	<div class="settings-toggle-grid">${adminSwitch('pbkdf2_enabled', 'admin.settings.pbkdf2Enabled', '启用 PBKDF2 密码哈希', Boolean(settings.pbkdf2_enabled ?? true))}</div>
+	${adminField('admin.settings.pbkdf2Iterations', '迭代次数', adminInput({ id: 'pbkdf2_iterations', type: 'number', min: 10000, max: 100000, step: 10000, value: settings.pbkdf2_iterations || 100000 }), 'admin.settings.pbkdf2IterationsHint', '修改后仅影响新密码，已有用户下次登录时自动升级。')}`;
+	const notifyPanelWithLogs = adminPanel('admin.settings.securityNotifications', '安全与通知', 'admin.settings.securityNotificationsDesc', '控制验证、管理操作通知和访问日志保留。', `<div class="settings-toggle-grid">${rows}</div>${turnstileFields}${pbkdf2Field}${idCodecField}${logRetentionFields}`);
 	const contentPanel = adminPanel('admin.settings.contentPublishing', '内容发布', 'admin.settings.contentPublishingDesc', '控制发帖编辑器和内容能力。', `<div class="settings-toggle-grid">
 		${adminSwitch('posts_i18n_enabled', 'admin.settings.postsI18nEnabled', '启用多语言帖子', Boolean(settings.posts_i18n_enabled ?? true))}
 	</div><p class="muted" data-i18n="admin.settings.postsI18nHint">开启后，发帖和编辑时可维护多个语言版本；管理员始终可用。</p>
+	<div class="admin-section-title mt-12"><strong data-i18n="admin.settings.postLimits">字数限制</strong><span data-i18n="admin.settings.postLimitsDesc">控制发帖标题和正文的最大字数。</span></div>
+	<div class="level-rule-grid">
+		${adminField('admin.settings.maxTitleLength', '标题最大字数', adminInput({ id: 'max_title_length', type: 'number', min: 10, max: 500, step: 10, class: 'reward-input', value: settings.max_title_length || 100 }))}
+		${adminField('admin.settings.maxContentLength', '正文最大字数', adminInput({ id: 'max_content_length', type: 'number', min: 100, max: 100000, step: 100, class: 'reward-input', value: settings.max_content_length || 3000 }))}
+	</div>
 	<div class="admin-section-title mt-12"><strong data-i18n="admin.settings.videoEmbeds">视频嵌入</strong><span data-i18n="admin.settings.videoEmbedsDesc">配置允许 iframe 嵌入的视频来源。</span></div>
 	${adminField('admin.settings.videoEmbedDomains', 'iframe 白名单域名', adminTextarea(String(settings.video_embed_domains || 'youtube.com\nyoutu.be\nbilibili.com\nb23.tv'), { id: 'video_embed_domains', rows: 5, maxlength: 4000 }), 'admin.settings.videoEmbedDomainsHint', '每行一个域名。YouTube 和 Bilibili 会自动转为播放器，其他域名会直接放入 iframe；普通视频链接仍使用 video 标签。')}`, 'settings-wide');
 	const oauthProviders = [
@@ -1825,7 +1838,7 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 			<div class="oauth-provider-head"><div><strong>${escapeHtml(label)}</strong><span>/oauth/${escapeHtml(id)}/callback</span></div>${adminSwitch(enabledKey, `admin.settings.oauth${label}Enabled`, '启用', Boolean(settings[enabledKey]))}</div>
 			<div class="grid cols-2">
 				${adminField('admin.settings.oauthClientId', 'Client ID', adminInput({ id: clientIdKey, value: settings[clientIdKey] || '', autocomplete: 'off' }))}
-				${adminField('admin.settings.oauthClientSecret', 'Client Secret', adminInput({ id: secretKey, value: settings[secretKey] || '', type: 'password', autocomplete: 'new-password' }))}
+				${adminField('admin.settings.oauthClientSecret', 'Client Secret', adminPasswordInput({ id: secretKey, value: settings[secretKey] || '', autocomplete: 'new-password' }))}
 			</div>
 		</section>`;
 	}).join('')}</div><p class="muted" data-i18n="admin.settings.oauthRedirectHint">回调地址使用当前站点域名，可用 OAUTH_REDIRECT_BASE 覆盖。</p>`, 'settings-wide');
@@ -1834,7 +1847,7 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 		${adminField('admin.settings.smtpHost', 'SMTP Host', adminInput({ id: 'smtp_host', value: settings.smtp_host || '' }))}
 		${adminField('admin.settings.smtpPort', 'SMTP Port', adminInput({ id: 'smtp_port', value: settings.smtp_port || '' }))}
 		${adminField('admin.settings.smtpUser', 'SMTP User', adminInput({ id: 'smtp_user', value: settings.smtp_user || '' }))}
-		${adminField('admin.settings.smtpPass', 'SMTP Pass', adminInput({ id: 'smtp_pass', type: 'password', value: settings.smtp_pass || '' }))}
+		${adminField('admin.settings.smtpPass', 'SMTP Pass', adminPasswordInput({ id: 'smtp_pass', value: settings.smtp_pass || '' }))}
 		${adminField('admin.settings.smtpFrom', 'SMTP From', adminInput({ id: 'smtp_from', value: settings.smtp_from || '' }))}
 		${adminField('admin.settings.smtpFromName', 'SMTP From Name', adminInput({ id: 'smtp_from_name', value: settings.smtp_from_name || '' }))}
 	</div>`, 'settings-wide');
@@ -1897,6 +1910,10 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 .reward-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:end}.reward-row label{display:grid;gap:5px;color:var(--muted);font-size:12px}.reward-input{height:34px}
 @media(max-width:1100px){.settings-layout{grid-template-columns:1fr}.settings-side{grid-template-rows:auto auto}.settings-main{min-height:460px}.settings-toggle-grid,.reward-grid,.level-rule-grid{grid-template-columns:1fr}}
 @media(max-width:640px){.settings-tabs{overflow:auto}.reward-fields{grid-template-columns:1fr}}
+.pw-wrap{position:relative;display:flex;align-items:center}
+.pw-wrap .input{flex:1;padding-right:36px}
+.eye-btn{position:absolute;right:8px;background:none;border:none;color:var(--muted);cursor:pointer;padding:4px;display:flex;align-items:center;line-height:1}
+.eye-btn:hover{color:var(--text)}
 </style>`,
 		user,
 		content: `
@@ -1954,6 +1971,7 @@ export function renderSettingsPage(user: UserPayload, input: Record<string, any>
 	</div>
 </div>`,
 		script: `
+function togglePwField(id){const el=document.getElementById(id);if(!el)return;const isHidden=el.type==='password';el.type=isHidden?'text':'password';const btn=el.parentElement&&el.parentElement.querySelector('.eye-btn');if(btn)btn.innerHTML=isHidden?'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>':'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';}
 let mediaPickerPage=1, mediaPickerSelected='';
 let CONTENT_LOCALE=document.querySelector('[data-content-locale]')?.value||'${activeContentLocale}';
 const SETTINGS_LOCALIZED=${jsonScript(localizedSettings)};
@@ -2014,9 +2032,9 @@ document.getElementById('save-settings')?.addEventListener('click',async()=>{
 	const btn=document.getElementById('save-settings');
 	const body={};
 	writeSettingsLocalized();
-	['turnstile_enabled','notify_on_user_delete','notify_on_username_change','notify_on_avatar_change','notify_on_manual_verify','maintenance_enabled','oauth_google_enabled','oauth_github_enabled','oauth_epic_enabled','posts_i18n_enabled'].forEach(k=>body[k]=document.getElementById(k).checked);
-	['site_name','site_tagline','site_icon_url','maintenance_title','maintenance_message','maintenance_until','smtp_host','smtp_port','smtp_user','smtp_pass','smtp_from','smtp_from_name','oauth_google_client_id','oauth_google_client_secret','oauth_github_client_id','oauth_github_client_secret','oauth_epic_client_id','oauth_epic_client_secret'].forEach(k=>body[k]=document.getElementById(k).value);
-	['moderation_posts_default','moderation_comments_default','moderation_default_reject_reason','moderation_reject_reasons','id_codec_secret','visit_log_retention_days','visit_log_max_rows','video_embed_domains'].forEach(k=>body[k]=document.getElementById(k).value);
+	['turnstile_enabled','notify_on_user_delete','notify_on_username_change','notify_on_avatar_change','notify_on_manual_verify','maintenance_enabled','oauth_google_enabled','oauth_github_enabled','oauth_epic_enabled','posts_i18n_enabled','pbkdf2_enabled'].forEach(k=>body[k]=document.getElementById(k).checked);
+	['site_name','site_tagline','site_icon_url','maintenance_title','maintenance_message','maintenance_until','smtp_host','smtp_port','smtp_user','smtp_pass','smtp_from','smtp_from_name','oauth_google_client_id','oauth_google_client_secret','oauth_github_client_id','oauth_github_client_secret','oauth_epic_client_id','oauth_epic_client_secret','turnstile_site_key','turnstile_secret_key'].forEach(k=>body[k]=document.getElementById(k).value);
+	['moderation_posts_default','moderation_comments_default','moderation_default_reject_reason','moderation_reject_reasons','id_codec_secret','visit_log_retention_days','visit_log_max_rows','video_embed_domains','pbkdf2_iterations','max_title_length','max_content_length'].forEach(k=>body[k]=document.getElementById(k).value);
 	['reward_checkin_points','reward_checkin_experience','reward_post_points','reward_post_experience','reward_reply_points','reward_reply_experience','reward_post_replied_points','reward_post_replied_experience','level_max','level_base_experience','level_growth_multiplier'].forEach(k=>body[k]=document.getElementById(k).value);
 	body.locale=CONTENT_LOCALE;body.localized=SETTINGS_LOCALIZED;
 	try{await runButton(btn,t('common.processing','处理中...'),async function(done){const res=await fetch('/api/admin/settings',{method:'POST',headers:nonceHeaders(true),body:JSON.stringify(body)});const data=await res.json();if(!res.ok)throw new Error(data.error||t('admin.i18n.saveFailed','保存失败'));done();document.getElementById('settings-message').textContent=t('admin.editor.saved','已保存');});}catch(e){document.getElementById('settings-message').textContent=e.message||String(e);}

@@ -11,6 +11,7 @@ export type AdminSettingsApiContext = {
 	url: URL;
 	method: string;
 	db: D1Database;
+	env?: Record<string, unknown>;
 	jsonResponse: JsonResponse;
 	handleError: (e: any) => Response;
 	apiAdminUser: UserPayload | null;
@@ -27,6 +28,7 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 		url,
 		method,
 		db,
+		env,
 		jsonResponse,
 		handleError,
 		apiAdminUser,
@@ -43,6 +45,12 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				const settings = await db.prepare("SELECT key, value FROM settings").all();
 				const config: any = {
 					turnstile_enabled: false,
+				turnstile_site_key: '',
+				turnstile_secret_key: '',
+				pbkdf2_enabled: true,
+				pbkdf2_iterations: '100000',
+				max_title_length: '100',
+				max_content_length: '3000',
 					notify_on_user_delete: false,
 					notify_on_username_change: false,
 					notify_on_avatar_change: false,
@@ -90,13 +98,16 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				if (settings.results) {
 					for (const row of settings.results) {
 						const k = row.key as string;
-						if (k.startsWith('smtp_') || (k.startsWith('maintenance_') && k !== 'maintenance_enabled') || k === 'site_icon_url' || k === 'site_name' || k === 'site_tagline' || k === 'id_codec_secret' || k === 'video_embed_domains' || k.startsWith('oauth_') && (k.endsWith('_client_id') || k.endsWith('_client_secret')) || k.startsWith('reward_') || k.startsWith('moderation_') || k.startsWith('level_') || k.startsWith('visit_log_')) {
+						if (k.startsWith('smtp_') || (k.startsWith('maintenance_') && k !== 'maintenance_enabled') || k === 'site_icon_url' || k === 'site_name' || k === 'site_tagline' || k === 'id_codec_secret' || k === 'video_embed_domains' || (k.startsWith('oauth_') && (k.endsWith('_client_id') || k.endsWith('_client_secret'))) || k.startsWith('reward_') || k.startsWith('moderation_') || k.startsWith('level_') || k.startsWith('visit_log_') || k === 'turnstile_site_key' || k === 'turnstile_secret_key' || k === 'pbkdf2_iterations' || k === 'max_title_length' || k === 'max_content_length') {
 							config[k] = (row.value as string) || '';
 						} else {
 							config[k] = row.value === '1';
 						}
 					}
 				}
+				// Fall back to env vars for turnstile keys if not set in DB
+				if (!config.turnstile_site_key && env) config.turnstile_site_key = String((env as any).TURNSTILE_SITE_KEY || '');
+				if (!config.turnstile_secret_key && env) config.turnstile_secret_key = String((env as any).TURNSTILE_SECRET_KEY || '');
 				return jsonResponse(config);
 			} catch (e) {
 				return handleError(e);
@@ -109,15 +120,22 @@ export async function handleAdminSettingsApi(ctx: AdminSettingsApiContext): Prom
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 
 				const body = await request.json() as any;
-				const { turnstile_enabled, notify_on_user_delete, notify_on_username_change, notify_on_avatar_change, notify_on_manual_verify,
+				const { turnstile_enabled, turnstile_site_key, turnstile_secret_key, notify_on_user_delete, notify_on_username_change, notify_on_avatar_change, notify_on_manual_verify,
 					oauth_google_enabled, oauth_github_enabled, oauth_epic_enabled,
 					oauth_google_client_id, oauth_google_client_secret, oauth_github_client_id, oauth_github_client_secret, oauth_epic_client_id, oauth_epic_client_secret,
-					posts_i18n_enabled, video_embed_domains, site_name, site_tagline, site_icon_url, id_codec_secret, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from, smtp_from_name, maintenance_enabled, maintenance_title, maintenance_message, maintenance_until, moderation_posts_default, moderation_comments_default, moderation_default_reject_reason, moderation_reject_reasons, visit_log_retention_days, visit_log_max_rows } = body;
+					posts_i18n_enabled, video_embed_domains, site_name, site_tagline, site_icon_url, id_codec_secret, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from, smtp_from_name, maintenance_enabled, maintenance_title, maintenance_message, maintenance_until, moderation_posts_default, moderation_comments_default, moderation_default_reject_reason, moderation_reject_reasons, visit_log_retention_days, visit_log_max_rows,
+					pbkdf2_enabled, pbkdf2_iterations, max_title_length, max_content_length } = body;
 				
 				const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
 				const batch = [];
 
 				if (turnstile_enabled !== undefined) batch.push(stmt.bind('turnstile_enabled', turnstile_enabled ? '1' : '0'));
+				if (pbkdf2_enabled !== undefined) batch.push(stmt.bind('pbkdf2_enabled', pbkdf2_enabled ? '1' : '0'));
+				if (turnstile_site_key !== undefined) batch.push(stmt.bind('turnstile_site_key', String(turnstile_site_key || '').trim()));
+				if (turnstile_secret_key !== undefined) batch.push(stmt.bind('turnstile_secret_key', String(turnstile_secret_key || '').trim()));
+				if (pbkdf2_iterations !== undefined) batch.push(stmt.bind('pbkdf2_iterations', String(Math.max(10000, Math.min(100000, Math.floor(Number(pbkdf2_iterations) || 100000))))));
+				if (max_title_length !== undefined) batch.push(stmt.bind('max_title_length', String(Math.max(10, Math.min(500, Math.floor(Number(max_title_length) || 100))))));
+				if (max_content_length !== undefined) batch.push(stmt.bind('max_content_length', String(Math.max(100, Math.min(100000, Math.floor(Number(max_content_length) || 3000))))));
 				if (notify_on_user_delete !== undefined) batch.push(stmt.bind('notify_on_user_delete', notify_on_user_delete ? '1' : '0'));
 				if (notify_on_username_change !== undefined) batch.push(stmt.bind('notify_on_username_change', notify_on_username_change ? '1' : '0'));
 				if (notify_on_avatar_change !== undefined) batch.push(stmt.bind('notify_on_avatar_change', notify_on_avatar_change ? '1' : '0'));

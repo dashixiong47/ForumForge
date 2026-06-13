@@ -1,12 +1,13 @@
 import type { Security } from '../core/security';
 import type { DBCount, DBUser } from '../db/types';
-import { hashPassword, generateToken } from '../core/password';
+import { verifyPassword, hashPassword, hashPasswordSimple, generateToken, clampIterations, PBKDF2_DEFAULT } from '../core/password';
 import { hasControlCharacters, hasInvisibleCharacters, hasRestrictedKeywords, isVisuallyEmpty } from '../core/validation';
 import { generateIdenticon } from '../utils/identicon';
 import { sendEmail } from '../integrations/smtp';
 import { buildRegistrationOtpEmail, buildResetPasswordEmail } from '../emails/templates';
 import type { EmailLocale } from '../emails/templates';
 import type { JsonResponse } from './types';
+import { kvEmailCooldown } from '../core/kv';
 
 export type AuthApiContext = {
 	request: Request;
@@ -74,8 +75,23 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			const user = await db.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<DBUser>();
 			if (!user) return jsonResponse({ error: 'Username or Password Error' }, 401);
 
-			const passwordHash = await hashPassword(password);
-			if (user.password !== passwordHash) return jsonResponse({ error: 'Username or Password Error' }, 401);
+			const verify = await verifyPassword(password, user.password || '');
+			if (!verify.ok) return jsonResponse({ error: 'Username or Password Error' }, 401);
+			// Lazy-upgrade legacy or old-format hash to current PBKDF2 in the background (only when PBKDF2 enabled)
+			if (verify.shouldUpgrade) {
+				executionCtx.waitUntil(
+					Promise.all([
+						db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_enabled'").first<{ value: string }>(),
+						db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_iterations'").first<{ value: string }>(),
+					])
+						.then(async ([enabledRow, iterRow]) => {
+							if (enabledRow?.value === '0') return;
+							const hash = await hashPassword(password, clampIterations(parseInt(iterRow?.value || '') || PBKDF2_DEFAULT));
+							await db.prepare('UPDATE users SET password = ? WHERE id = ?').bind(hash, user.id).run();
+						})
+						.catch(() => {}),
+				);
+			}
 
 			const { token, jti, expiresAt } = await security.generateToken({
 				id: user.id,
@@ -114,6 +130,11 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 
 			const { email, locale: resetLocale } = body;
 			if (!email) return jsonResponse({ error: 'Missing email' }, 400);
+
+			if (env.CACHE) {
+				const wait = await kvEmailCooldown(env.CACHE, 'forgot', email, 60).catch(() => 0);
+				if (wait > 0) return jsonResponse({ error: `请等待 ${wait} 秒后再重新发送。`, cooldown: wait }, 429);
+			}
 
 			const user = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<{ id: number }>();
 			if (!user) return jsonResponse({ success: true });
@@ -156,7 +177,14 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			if (!user) return jsonResponse({ error: 'Invalid token' }, 400);
 			if (!user.reset_token_expires || Date.now() > user.reset_token_expires) return jsonResponse({ error: 'Token expired' }, 400);
 
-			const passwordHash = await hashPassword(newPassword);
+			const [pbkdf2EnabledRow, iterRow] = await Promise.all([
+				db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_enabled'").first<{ value: string }>(),
+				db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_iterations'").first<{ value: string }>(),
+			]);
+			const pbkdf2On = pbkdf2EnabledRow?.value !== '0';
+			const passwordHash = pbkdf2On
+				? await hashPassword(newPassword, clampIterations(parseInt(iterRow?.value || '') || PBKDF2_DEFAULT))
+				: await hashPasswordSimple(newPassword);
 			await db.prepare('UPDATE users SET password = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ?').bind(passwordHash, user.id).run();
 			return jsonResponse({ success: true });
 		} catch (e) {
@@ -177,6 +205,11 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			if (!email) return jsonResponse({ error: 'Missing email' }, 400);
 			if (email.length > 50) return jsonResponse({ error: 'Email too long (Max 50 chars)' }, 400);
 			if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return jsonResponse({ error: 'Invalid email' }, 400);
+
+			if (env.CACHE) {
+				const wait = await kvEmailCooldown(env.CACHE, 'regcode', email, 60).catch(() => 0);
+				if (wait > 0) return jsonResponse({ error: `请等待 ${wait} 秒后再重新发送。`, cooldown: wait }, 429);
+			}
 
 			const existingEmail = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<{ id: number }>();
 			if (existingEmail) return jsonResponse({ error: 'Email already exists' }, 409);
@@ -205,11 +238,6 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 	if (url.pathname === '/api/register' && method === 'POST') {
 		try {
 			const body = await request.json() as any;
-			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
-			if (!(await checkTurnstile(body, ip))) {
-				return jsonResponse({ error: 'Turnstile verification failed' }, 403);
-			}
-
 			const email = String(body.email || '').trim().toLowerCase();
 			const { password } = body;
 			const code = String(body.code || '').trim();
@@ -240,7 +268,14 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 				return jsonResponse({ error: '验证码错误。' }, 400);
 			}
 
-			const passwordHash = await hashPassword(password);
+			const [pbkdf2EnabledRow2, iterRow2] = await Promise.all([
+				db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_enabled'").first<{ value: string }>(),
+				db.prepare("SELECT value FROM settings WHERE key = 'pbkdf2_iterations'").first<{ value: string }>(),
+			]);
+			const pbkdf2On2 = pbkdf2EnabledRow2?.value !== '0';
+			const passwordHash = pbkdf2On2
+				? await hashPassword(password, clampIterations(parseInt(iterRow2?.value || '') || PBKDF2_DEFAULT))
+				: await hashPasswordSimple(password);
 			const { success, meta } = await db.prepare(
 				'INSERT INTO users (email, username, password, role, verified, verification_token) VALUES (?, ?, ?, "user", ?, ?)'
 			).bind(email, username, passwordHash, 1, null).run();

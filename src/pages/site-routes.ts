@@ -215,6 +215,12 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			if (url.pathname === '/new-post') {
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
 				const tags = await getSiteTags();
+				const [maxTitleRow, maxContentRow] = await Promise.all([
+					db.prepare("SELECT value FROM settings WHERE key = 'max_title_length'").first<{ value: string }>(),
+					db.prepare("SELECT value FROM settings WHERE key = 'max_content_length'").first<{ value: string }>(),
+				]);
+				const maxTitleLength = Math.max(10, Math.min(500, parseInt(maxTitleRow?.value || '') || 100));
+				const maxContentLength = Math.max(100, Math.min(100000, parseInt(maxContentRow?.value || '') || 3000));
 				return siteHtmlResponse(renderNewPostPage({
 					user,
 					env,
@@ -225,7 +231,9 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					locale: currentLocale,
 					postI18nEnabled: await canUsePostI18n(),
 					videoEmbedDomains: await getVideoEmbedDomains(),
-				}));
+					maxTitleLength,
+					maxContentLength,
+				} as any));
 			}
 
 			const userMatch = url.pathname.match(/^\/users\/([0-9A-Za-z]+)$/) || url.pathname.match(/^\/u\/([0-9A-Za-z]+)$/);
@@ -314,6 +322,12 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const translationsRes = await db.prepare('SELECT locale, title, content, updated_at FROM post_translations WHERE post_id = ?').bind(postId).all();
 				(postWithTags as any).translations = Object.fromEntries(((translationsRes.results || []) as any[]).map((row) => [row.locale, row]));
 				const tags = await getSiteTags();
+				const [maxTitleRowE, maxContentRowE] = await Promise.all([
+					db.prepare("SELECT value FROM settings WHERE key = 'max_title_length'").first<{ value: string }>(),
+					db.prepare("SELECT value FROM settings WHERE key = 'max_content_length'").first<{ value: string }>(),
+				]);
+				const maxTitleLengthE = Math.max(10, Math.min(500, parseInt(maxTitleRowE?.value || '') || 100));
+				const maxContentLengthE = Math.max(100, Math.min(100000, parseInt(maxContentRowE?.value || '') || 3000));
 				return siteHtmlResponse(renderNewPostPage({
 					user,
 					env,
@@ -325,7 +339,9 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					locale: currentLocale,
 					postI18nEnabled: await canUsePostI18n(),
 					videoEmbedDomains: await getVideoEmbedDomains(),
-				}));
+					maxTitleLength: maxTitleLengthE,
+					maxContentLength: maxContentLengthE,
+				} as any));
 			}
 
 			const postMatch = url.pathname.match(/^\/posts\/([0-9A-Za-z]+)$/) || url.pathname.match(/^\/post\/([0-9A-Za-z]+)$/);

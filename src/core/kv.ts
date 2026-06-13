@@ -120,6 +120,25 @@ export async function kvDrainViewCounts(kv: KVNamespace): Promise<Map<string, nu
 	return result;
 }
 
+const KV_EMAIL_COOLDOWN_PREFIX = 'email-cd:';
+
+// Returns remaining cooldown seconds. 0 = allowed (and cooldown is now set). >0 = still cooling down.
+export async function kvEmailCooldown(
+	kv: KVNamespace,
+	scope: string,
+	email: string,
+	cooldownSeconds: number,
+): Promise<number> {
+	const key = KV_EMAIL_COOLDOWN_PREFIX + scope + ':' + email.toLowerCase();
+	const existing = await kv.get(key);
+	if (existing) {
+		const remaining = Math.ceil((parseInt(existing) - Date.now()) / 1000);
+		return remaining > 0 ? remaining : 0;
+	}
+	await kv.put(key, String(Date.now() + cooldownSeconds * 1000), { expirationTtl: cooldownSeconds });
+	return 0;
+}
+
 // Returns true if the request is allowed, false if rate-limited.
 // Uses best-effort non-atomic increment — suitable for spam/brute-force prevention,
 // not for billing-grade accuracy.
