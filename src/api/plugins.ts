@@ -1,5 +1,6 @@
 import type { DBPlugin } from '../db/types';
-import { comparePluginVersion, hydrateBuiltinPluginRow, normalizePluginId, normalizePluginManifest } from '../plugins/registry';
+import { comparePluginVersion, hydrateBuiltinPluginRow, normalizePluginId, normalizePluginManifest, validatePluginConfig } from '../plugins/registry';
+import { parseJsonValue, safeJsonString } from '../utils/json';
 import type { UserPayload } from '../core/security';
 import type { JsonResponse } from './types';
 
@@ -34,7 +35,10 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 		if (url.pathname === '/api/plugins' && method === 'GET') {
 			try {
 				const { results } = await db.prepare(
-					'SELECT id, slug, name, description, version, enabled, config, author, homepage, icon, type, css, html, js, head_html, block_types, i18n, config_schema, permissions, tags FROM plugins WHERE enabled = 1 ORDER BY name ASC'
+					`SELECT id, slug, name, description, version, enabled, config, author, homepage, icon, type, css, html, js, head_html, block_types, resource_types, i18n, config_schema, permissions, tags
+					   FROM plugins
+					  WHERE enabled = 1 AND COALESCE(deleted_at, 0) = 0
+					  ORDER BY name ASC`
 				).all();
 				return jsonResponse(((results || []) as unknown as DBPlugin[]).map((row) => pluginRowToManifest(row)));
 			} catch (e) {
@@ -49,7 +53,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const id = normalizePluginId(decodeURIComponent(parts[3] || ''));
 				if (!id) return jsonResponse({ error: 'Invalid plugin id' }, 400);
 				const row = await db.prepare(
-					'SELECT * FROM plugins WHERE id = ? OR slug = ?'
+					'SELECT * FROM plugins WHERE (id = ? OR slug = ?) AND COALESCE(deleted_at, 0) = 0'
 				).bind(id, id).first<DBPlugin>();
 				if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
 				return jsonResponse(pluginRowToManifest(row, true));
@@ -65,7 +69,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const body = await request.json().catch(() => ({})) as any;
 				const token = String(body.token || url.searchParams.get('token') || '').trim();
 				const row = await db.prepare(
-					'SELECT id, slug, share_token, share_notify FROM plugins WHERE id = ? OR slug = ?'
+					'SELECT id, slug, share_token, share_notify FROM plugins WHERE (id = ? OR slug = ?) AND COALESCE(deleted_at, 0) = 0'
 				).bind(id, id).first<DBPlugin>();
 				if (!row || !row.share_token || row.share_token !== token || row.share_notify === 0) {
 					return jsonResponse({ ok: false }, 202);
@@ -94,7 +98,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const { results } = await db.prepare(
-					'SELECT * FROM plugins ORDER BY name ASC'
+					'SELECT * FROM plugins WHERE COALESCE(deleted_at, 0) = 0 ORDER BY name ASC'
 				).all();
 				const installs = await db.prepare(
 					'SELECT plugin_id, COUNT(*) AS count FROM plugin_share_events GROUP BY plugin_id'
@@ -150,7 +154,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const { results } = await db.prepare(
-					"SELECT id, slug, name, version, source_url FROM plugins WHERE source_url IS NOT NULL AND source_url != '' ORDER BY name ASC"
+					"SELECT id, slug, name, version, source_url FROM plugins WHERE source_url IS NOT NULL AND source_url != '' AND COALESCE(deleted_at, 0) = 0 ORDER BY name ASC"
 				).all();
 				const rows = (results || []) as unknown as DBPlugin[];
 				const updates = await Promise.all(
@@ -190,7 +194,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
-				const existing = await db.prepare('SELECT * FROM plugins WHERE id = ?').bind(id).first<DBPlugin>();
+				const existing = await db.prepare('SELECT * FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
 				if (!existing) return jsonResponse({ error: 'Plugin not found' }, 404);
 				if (!existing.source_url) return jsonResponse({ error: 'Plugin has no source URL' }, 400);
 				const response = await fetch(existing.source_url, {
@@ -219,7 +223,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
-				const existing = await db.prepare('SELECT * FROM plugins WHERE id = ?').bind(id).first<DBPlugin>();
+				const existing = await db.prepare('SELECT * FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
 				if (!existing) return jsonResponse({ error: 'Plugin not found' }, 404);
 				const body = await request.json() as any;
 				const result = normalizePluginManifest({
@@ -244,10 +248,34 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const id = decodeURIComponent(url.pathname.split('/')[4] || '');
 				const body = await request.json() as any;
 				const enabled = body.enabled ? 1 : 0;
+				if (enabled) {
+					const row = await db.prepare('SELECT config_schema, config FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
+					if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
+					const checked = validatePluginConfig(row.config_schema || '{}', parseJsonValue(row.config, {}), { requireRequired: true });
+					if (!checked.ok) return jsonResponse({ error: checked.error, field: checked.field, code: 'PLUGIN_CONFIG_REQUIRED' }, 400);
+				}
 				const result = await db.prepare(
 					'UPDATE plugins SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
 				).bind(enabled, id).run();
 				return jsonResponse({ success: result.success });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// PUT /api/admin/plugins/:id/config
+		if (url.pathname.match(/^\/api\/admin\/plugins\/[^/]+\/config$/) && method === 'PUT') {
+			try {
+				const userPayload = apiAdminUser || await authenticateAdminForPath();
+				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
+				if (!id) return jsonResponse({ error: 'Invalid plugin id' }, 400);
+				const row = await db.prepare('SELECT id, config_schema FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
+				if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
+				const body = await request.json().catch(() => ({})) as any;
+				const checked = validatePluginConfig(row.config_schema || '{}', body.config || body || {}, { requireRequired: true });
+				if (!checked.ok) return jsonResponse({ error: checked.error, field: checked.field, code: 'PLUGIN_CONFIG_REQUIRED' }, 400);
+				await db.prepare('UPDATE plugins SET config = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(safeJsonString(checked.config, {}), id).run();
+				return jsonResponse({ success: true, config: checked.config });
 			} catch (e) {
 				return handleError(e);
 			}
@@ -259,7 +287,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
 				if (!id) return jsonResponse({ error: 'Invalid plugin id' }, 400);
-				await db.prepare('DELETE FROM plugins WHERE id = ?').bind(id).run();
+				await db.prepare('UPDATE plugins SET enabled = 0, deleted_at = ?, deleted_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(Math.floor(Date.now() / 1000), userPayload.id, id).run();
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -271,7 +299,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
-				const rawRow = await db.prepare('SELECT * FROM plugins WHERE id = ?').bind(id).first<DBPlugin>();
+				const rawRow = await db.prepare('SELECT * FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
 				const row = rawRow ? hydrateBuiltinPluginRow(rawRow) : null;
 				if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
 				return jsonResponse(pluginRowToManifest(row, true));
@@ -285,7 +313,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
-				let row = await db.prepare('SELECT * FROM plugins WHERE id = ?').bind(id).first<DBPlugin>();
+				let row = await db.prepare('SELECT * FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
 				if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
 				if (!row.share_token) {
 					const token = crypto.randomUUID();
@@ -294,7 +322,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				}
 				const base = getBaseUrl().replace(/\/$/, '');
 				const pluginSlug = row.slug || row.id;
-				const manifestUrl = `${base}/api/plugins/${encodeURIComponent(pluginSlug)}/manifest.json`;
+				const manifestUrl = `${base}/api/plugins/${encodeURIComponent(pluginSlug)}/manifest.json?token=${encodeURIComponent(row.share_token || '')}`;
 				return jsonResponse({
 					installUrl: `${base}/admin/plugins?install=${encodeURIComponent(manifestUrl)}`,
 					manifestUrl,
@@ -312,7 +340,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 			try {
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
-				const row = await db.prepare('SELECT share_notify FROM plugins WHERE id = ?').bind(id).first<{ share_notify: number }>();
+				const row = await db.prepare('SELECT share_notify FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<{ share_notify: number }>();
 				if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
 				const next = row.share_notify === 0 ? 1 : 0;
 				await db.prepare('UPDATE plugins SET share_notify = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(next, id).run();

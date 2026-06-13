@@ -31,6 +31,12 @@ CREATE TABLE users (
   avatar_url TEXT,
   nickname TEXT,
   email_notifications INTEGER DEFAULT 1,
+  disabled_until INTEGER DEFAULT 0,
+  disabled_reason TEXT DEFAULT '',
+  muted_until INTEGER DEFAULT 0,
+  muted_reason TEXT DEFAULT '',
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -48,6 +54,8 @@ CREATE TABLE posts (
   category_id INTEGER,
   is_pinned INTEGER DEFAULT 0,
   view_count INTEGER NOT NULL DEFAULT 0,
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (author_id) REFERENCES users(id),
   FOREIGN KEY (category_id) REFERENCES categories(id)
@@ -59,6 +67,8 @@ CREATE TABLE comments (
   parent_id INTEGER,
   author_id INTEGER NOT NULL,
   content TEXT NOT NULL,
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (post_id) REFERENCES posts(id),
   FOREIGN KEY (parent_id) REFERENCES comments(id),

@@ -1,6 +1,17 @@
 import type { DBPlugin } from '../db/types';
 import { safeJsonString } from '../utils/json';
 
+export type PluginConfigField = {
+	key: string;
+	type: string;
+	label: string;
+	description: string;
+	placeholder: string;
+	required: boolean;
+	defaultValue: any;
+	options: Array<{ label: string; value: string }>;
+};
+
 export const BUILTIN_PLUGINS = [
 	{
 		id: 'markdown-editor',
@@ -65,6 +76,7 @@ export function hydrateBuiltinPluginRow(row: DBPlugin): DBPlugin {
 		css: row.css || builtin.css,
 		html: row.html || builtin.html,
 		js: row.js || builtin.js,
+		resource_types: row.resource_types || safeJsonString((builtin as any).resourceTypes, []),
 		i18n: row.i18n && row.i18n !== '{}' ? row.i18n : JSON.stringify(builtin.i18n),
 	};
 }
@@ -80,6 +92,85 @@ export function normalizePluginType(value: unknown): string {
 	return PLUGIN_TYPES.has(type) ? type : 'system';
 }
 
+function normalizeConfigOptions(options: unknown): Array<{ label: string; value: string }> {
+	if (!Array.isArray(options)) return [];
+	return options.map((option) => {
+		if (option && typeof option === 'object') {
+			const raw = option as Record<string, any>;
+			const value = String(raw.value ?? raw.id ?? raw.key ?? '').trim();
+			const label = String(raw.label ?? raw.name ?? value).trim();
+			return value ? { label: label || value, value } : null;
+		}
+		const value = String(option ?? '').trim();
+		return value ? { label: value, value } : null;
+	}).filter(Boolean) as Array<{ label: string; value: string }>;
+}
+
+export function normalizePluginConfigSchema(schema: unknown): { fields: PluginConfigField[] } {
+	const raw = typeof schema === 'string'
+		? (() => { try { return JSON.parse(schema); } catch { return {}; } })()
+		: schema;
+	const fieldsRaw = Array.isArray(raw)
+		? raw
+		: Array.isArray((raw as any)?.fields)
+			? (raw as any).fields
+			: [];
+	const fields = fieldsRaw.map((field: any) => {
+		const key = String(field?.key ?? field?.name ?? '').trim();
+		if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) return null;
+		const typeRaw = String(field?.type || 'text').trim().toLowerCase();
+		const type = ['text', 'textarea', 'password', 'number', 'boolean', 'select', 'url', 'email'].includes(typeRaw) ? typeRaw : 'text';
+		const label = String(field?.label ?? field?.title ?? key).trim() || key;
+		return {
+			key,
+			type,
+			label,
+			description: String(field?.description ?? field?.help ?? '').trim(),
+			placeholder: String(field?.placeholder ?? '').trim(),
+			required: Boolean(field?.required),
+			defaultValue: field?.default ?? field?.defaultValue ?? '',
+			options: normalizeConfigOptions(field?.options),
+		};
+	}).filter(Boolean) as PluginConfigField[];
+	return { fields };
+}
+
+export function validatePluginConfig(schema: unknown, config: unknown, options: { requireRequired?: boolean } = {}): { ok: true; config: Record<string, any> } | { ok: false; error: string; field?: string } {
+	const requireRequired = options.requireRequired !== false;
+	const normalizedSchema = normalizePluginConfigSchema(schema);
+	const input = config && typeof config === 'object' && !Array.isArray(config) ? config as Record<string, any> : {};
+	const output: Record<string, any> = {};
+	for (const field of normalizedSchema.fields) {
+		let value = input[field.key];
+		if ((value === undefined || value === null || value === '') && field.defaultValue !== undefined && field.defaultValue !== null && field.defaultValue !== '') value = field.defaultValue;
+		if (field.type === 'boolean') {
+			value = value === true || value === 1 || value === '1' || value === 'true' || value === 'on';
+		} else if (field.type === 'number') {
+			if (value === undefined || value === null || value === '') {
+				value = '';
+			} else {
+				const n = Number(value);
+				if (!Number.isFinite(n)) return { ok: false, error: `${field.label} must be a number`, field: field.key };
+				value = n;
+			}
+		} else {
+			value = String(value ?? '').trim();
+		}
+		if (field.required && requireRequired) {
+			const missing = field.type === 'boolean' ? value !== true : value === '';
+			if (missing) return { ok: false, error: `${field.label} is required`, field: field.key };
+		}
+		if (field.type === 'select' && value !== '' && field.options.length && !field.options.some((option) => option.value === value)) {
+			return { ok: false, error: `${field.label} has an invalid value`, field: field.key };
+		}
+		output[field.key] = value;
+	}
+	for (const [key, value] of Object.entries(input)) {
+		if (!(key in output) && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) output[key] = value;
+	}
+	return { ok: true, config: output };
+}
+
 export function normalizePluginManifest(raw: unknown): { ok: true; manifest: any } | { ok: false; error: string } {
 	if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid plugin manifest' };
 	const input = raw as Record<string, any>;
@@ -88,6 +179,9 @@ export function normalizePluginManifest(raw: unknown): { ok: true; manifest: any
 	if (!id) return { ok: false, error: 'Plugin id must be lowercase letters, numbers, and hyphens' };
 	if (!name) return { ok: false, error: 'Plugin name is required' };
 	const type = normalizePluginType(input.type);
+	const configSchema = normalizePluginConfigSchema(input.configSchema ?? input.config_schema);
+	const configResult = validatePluginConfig(configSchema, input.config || {}, { requireRequired: Boolean(input.enabled) });
+	if (!configResult.ok) return configResult;
 	return {
 		ok: true,
 		manifest: {
@@ -97,7 +191,7 @@ export function normalizePluginManifest(raw: unknown): { ok: true; manifest: any
 			description: String(input.description || '').trim(),
 			version: String(input.version || '1.0.0').trim() || '1.0.0',
 			enabled: input.enabled === undefined ? 0 : (input.enabled ? 1 : 0),
-			config: safeJsonString(input.config, {}),
+			config: safeJsonString(configResult.config, {}),
 			author: String(input.author || '').trim(),
 			homepage: String(input.homepage || '').trim(),
 			icon: String(input.icon || 'Puzzle').trim() || 'Puzzle',
@@ -107,8 +201,9 @@ export function normalizePluginManifest(raw: unknown): { ok: true; manifest: any
 			js: String(input.js || ''),
 			head_html: String(input.headHtml ?? input.head_html ?? ''),
 			block_types: safeJsonString(input.blockTypes ?? input.block_types, []),
+			resource_types: safeJsonString(input.resourceTypes ?? input.resource_types, []),
 			i18n: safeJsonString(input.i18n ?? input.i18nStrings, {}),
-			config_schema: safeJsonString(input.configSchema ?? input.config_schema, {}),
+			config_schema: safeJsonString(configSchema, {}),
 			permissions: safeJsonString(input.permissions, []),
 			tags: safeJsonString(input.tags, []),
 			source_url: String(input.sourceUrl ?? input.source_url ?? '').trim(),

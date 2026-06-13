@@ -262,7 +262,7 @@ export async function handleTaxonomyApi(ctx: TaxonomyApiContext): Promise<Respon
 		const id = url.pathname.split('/')[4];
 		try {
 			const userPayload = apiAdminUser || await authenticateAdminForPath();
-			const count = await db.prepare('SELECT COUNT(*) as count FROM posts WHERE category_id = ?').bind(id).first<number>('count');
+			const count = await db.prepare('SELECT COUNT(*) as count FROM posts WHERE category_id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<number>('count');
 			if ((count ?? 0) > 0) {
 				return jsonResponse({ error: 'Cannot delete category with existing posts' }, 400);
 			}

@@ -1,0 +1,4 @@
+ALTER TABLE users ADD COLUMN disabled_until INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN disabled_reason TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN muted_until INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN muted_reason TEXT DEFAULT '';

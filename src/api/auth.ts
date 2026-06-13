@@ -72,8 +72,9 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			const { email, password } = body;
 			if (!email || !password) return jsonResponse({ error: 'Missing email or password' }, 400);
 
-			const user = await db.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<DBUser>();
+			const user = await db.prepare('SELECT * FROM users WHERE email = ? AND COALESCE(deleted_at, 0) = 0').bind(email).first<DBUser>();
 			if (!user) return jsonResponse({ error: 'Username or Password Error' }, 401);
+			if (Number((user as any).disabled_until || 0) > Math.floor(Date.now() / 1000)) return jsonResponse({ error: 'Account disabled' }, 403);
 
 			const verify = await verifyPassword(password, user.password || '');
 			if (!verify.ok) return jsonResponse({ error: 'Username or Password Error' }, 401);
@@ -136,7 +137,7 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 				if (wait > 0) return jsonResponse({ error: `请等待 ${wait} 秒后再重新发送。`, cooldown: wait }, 429);
 			}
 
-			const user = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<{ id: number }>();
+			const user = await db.prepare('SELECT id FROM users WHERE email = ? AND COALESCE(deleted_at, 0) = 0').bind(email).first<{ id: number }>();
 			if (!user) return jsonResponse({ success: true });
 
 			const token = generateToken();
@@ -173,7 +174,7 @@ export async function handleAuthApi(ctx: AuthApiContext): Promise<Response | nul
 			if (!token || !newPassword) return jsonResponse({ error: 'Missing parameters' }, 400);
 			if (newPassword.length < 8 || newPassword.length > 16) return jsonResponse({ error: 'Password must be 8-16 characters' }, 400);
 
-			const user = await db.prepare('SELECT * FROM users WHERE reset_token = ?').bind(token).first<DBUser>();
+			const user = await db.prepare('SELECT * FROM users WHERE reset_token = ? AND COALESCE(deleted_at, 0) = 0').bind(token).first<DBUser>();
 			if (!user) return jsonResponse({ error: 'Invalid token' }, 400);
 			if (!user.reset_token_expires || Date.now() > user.reset_token_expires) return jsonResponse({ error: 'Token expired' }, 400);
 

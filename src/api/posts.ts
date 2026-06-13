@@ -6,6 +6,7 @@ import { extractImageUrls } from '../utils/media';
 import { deleteImage, type S3Env } from '../integrations/s3';
 import { publicPostPath } from '../core/id-codec';
 import type { JsonResponse } from './types';
+import { createPluginResource, resourcePluginForType } from './plugin-resources';
 
 export type PostsApiContext = {
 	request: Request;
@@ -43,6 +44,9 @@ const escapeHtml = (value: unknown) => String(value || '')
 	.replace(/>/g, '&gt;')
 	.replace(/"/g, '&quot;')
 	.replace(/'/g, '&#039;');
+
+const MAX_PLUGIN_SUBMIT_RESOURCES = 20;
+const MAX_PLUGIN_RESOURCE_PAYLOAD = 1024 * 1024;
 
 export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | null> {
 	const {
@@ -182,10 +186,49 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		}
 	};
 
+	const persistPostPluginResources = async (postId: number | string, body: any, userPayload: UserPayload, content: string) => {
+		const items = Array.isArray(body?.plugin_resources) ? body.plugin_resources.slice(0, MAX_PLUGIN_SUBMIT_RESOURCES) : [];
+		if (!items.length) return content;
+		let nextContent = String(content || '');
+		for (const item of items) {
+			const type = String(item?.type || '').trim().toLowerCase();
+			const payload = String(item?.payload ?? item?.data ?? '').trim().slice(0, MAX_PLUGIN_RESOURCE_PAYLOAD);
+			if (!type || !payload) continue;
+			const typeGate = await resourcePluginForType(db, type);
+			if (!typeGate.pluginId || !typeGate.enabled) throw new Error('Unsupported plugin resource type');
+			const title = String(item?.title || type).trim().slice(0, 200) || type;
+			const meta = item && typeof item.meta === 'object' && item.meta ? item.meta : {};
+			const created = await createPluginResource(runtimeEnvForLinks, db, {
+				type,
+				pluginId: typeGate.pluginId,
+				authorId: userPayload.id,
+				postId: Number(postId),
+				title,
+				payload,
+				meta,
+			});
+			const placeholder = String(item?.placeholder || item?.token || '').slice(0, 240);
+			const replacementTemplate = String(item?.replacement || item?.markdown || '').slice(0, 1000);
+			if (placeholder && replacementTemplate) {
+				const replacement = replacementTemplate
+					.replace(/\{id\}/g, created.id)
+					.replace(/\{type\}/g, type)
+					.replace(/\{title\}/g, title);
+				nextContent = nextContent.split(placeholder).join(replacement);
+			}
+		}
+		return nextContent;
+	};
+
 	const resolvePublishedStatus = async (userPayload: UserPayload, isAdminEdit = false) => {
 		if (userPayload.role === 'admin' || isAdminEdit) return 'approved';
 		const moderation = await db.prepare("SELECT value FROM settings WHERE key = 'moderation_posts_default'").first<DBSetting>();
 		return moderation?.value === 'pending' ? 'pending' : 'approved';
+	};
+
+	const ensureCanPublishContent = (userPayload: UserPayload, scope: 'posts' | 'comments' = 'posts') => {
+		if (canAdmin(userPayload, scope)) return;
+		if (Number((userPayload as any).muted_until || 0) > Math.floor(Date.now() / 1000)) throw new Error('AccountMuted');
 	};
 
 	if (url.pathname === '/api/posts' && method === 'GET') {
@@ -211,7 +254,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 					categories.name as category_name,
 					categories.admin_only as admin_only,
 					(SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) as like_count,
-					(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
+					(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0) as comment_count
 				FROM posts
 				JOIN users ON posts.author_id = users.id
 				LEFT JOIN categories ON posts.category_id = categories.id`;
@@ -221,6 +264,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const countParams: any[] = [];
 			const conditions: string[] = [
 				`COALESCE(posts.status, 'approved') = 'approved'`,
+				`COALESCE(posts.deleted_at, 0) = 0`,
 				`(posts.category_id IS NULL OR (COALESCE(categories.enabled, 1) = 1 AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)))`
 			];
 			params.push(includeAdminOnly ? 1 : 0);
@@ -286,11 +330,11 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 					users.role as author_role,
 					categories.name as category_name,
 					(SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) as like_count,
-					(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
+					(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0) as comment_count
 				FROM posts
 				JOIN users ON posts.author_id = users.id
 				LEFT JOIN categories ON posts.category_id = categories.id
-				WHERE posts.id = ? AND COALESCE(posts.status, 'approved') = 'approved' AND (posts.category_id IS NULL OR COALESCE(categories.enabled, 1) = 1)`
+				WHERE posts.id = ? AND COALESCE(posts.status, 'approved') = 'approved' AND COALESCE(posts.deleted_at, 0) = 0 AND (posts.category_id IS NULL OR COALESCE(categories.enabled, 1) = 1)`
 			).bind(postId).first<any>();
 			let viewer: UserPayload | null = null;
 			try {
@@ -337,10 +381,11 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const body = await request.json() as any;
 			const { category_id } = body;
 			const saveDraft = wantsDraft(body);
+			if (!saveDraft) ensureCanPublishContent(userPayload);
 			const normalized = normalizePostInput(body, saveDraft);
 			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
 			const title = normalized.title;
-			const content = normalized.content;
+			let content = normalized.content;
 			const minViewLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_view_level || 0) || 0)));
 			const minCommentLevel = Math.max(0, Math.min(999, Math.floor(Number(body.min_comment_level || 0) || 0)));
 			const tagIds = parseTagIds(body.tag_ids);
@@ -351,7 +396,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const translationsError = await validatePostTranslations(body, title, content, i18nEnabled);
 			if (translationsError) return jsonResponse({ error: translationsError }, 400);
 
-			const post = await db.prepare('SELECT author_id, status, rejection_reason FROM posts WHERE id = ?').bind(postId).first<any>();
+			const post = await db.prepare('SELECT author_id, status, rejection_reason FROM posts WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(postId).first<any>();
 			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
 
 			const isAdminEdit = canAdmin(userPayload, 'posts');
@@ -372,6 +417,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 				nextStatus = await resolvePublishedStatus(userPayload, isAdminEdit);
 				nextRejectReason = '';
 			}
+			content = await persistPostPluginResources(postId, body, userPayload, content);
 			await db.prepare(
 				'UPDATE posts SET title = ?, content = ?, category_id = ?, min_view_level = ?, min_comment_level = ?, status = ?, rejection_reason = ? WHERE id = ?'
 			).bind(title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, nextStatus, nextStatus === 'rejected' ? nextRejectReason : '', postId).run();
@@ -392,7 +438,11 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		const postId = url.pathname.split('/')[3];
 		try {
 			const userPayload = await requireVerifiedUser(await authenticate(request));
-			const post = await db.prepare('SELECT author_id, title, content, category_id, status FROM posts WHERE id = ?').bind(postId).first<any>();
+			ensureCanPublishContent(userPayload, 'comments');
+			const body = await request.json().catch(() => ({})) as any;
+			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+			if (!(await checkTurnstile(body, ip))) return jsonResponse({ error: 'Turnstile verification failed' }, 403);
+			const post = await db.prepare('SELECT author_id, title, content, category_id, status FROM posts WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(postId).first<any>();
 			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
 			const isAdminEdit = canAdmin(userPayload, 'posts');
 			if (Number(post.author_id) !== Number(userPayload.id) && !isAdminEdit) return jsonResponse({ error: 'Unauthorized' }, 403);
@@ -420,20 +470,13 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		const id = url.pathname.split('/')[3];
 		try {
 			const userPayload = await authenticate(request);
-			const post = await db.prepare('SELECT author_id, content FROM posts WHERE id = ?').bind(id).first<any>();
+			const post = await db.prepare('SELECT author_id, content FROM posts WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<any>();
 			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
 			if (post.author_id !== userPayload.id) return jsonResponse({ error: 'Unauthorized' }, 403);
 
-			const imageUrls = extractImageUrls(post.content as string);
-			if (imageUrls.length > 0) {
-				executionCtx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, userPayload.id))).catch(err => console.error('Failed to delete post images', err)));
-			}
-			await db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
-			await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(id, id).run();
-			await db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
-			await db.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(id).run();
-			await db.prepare('DELETE FROM post_translations WHERE post_id = ?').bind(id).run();
-			await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
+			const now = Math.floor(Date.now() / 1000);
+			await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+			await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
 			await security.logAudit(userPayload.id, 'DELETE_POST', 'post', id, {}, request);
 			invalidatePublicContent?.('post:delete');
 			return jsonResponse({ success: true });
@@ -446,6 +489,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		const postId = url.pathname.split('/')[3];
 		try {
 			const userPayload = await requireVerifiedUser(await authenticate(request));
+			ensureCanPublishContent(userPayload);
 			const body = await request.json() as any;
 			const { content, parent_id } = body;
 			if (!content || String(content).length > 3000) return jsonResponse({ error: 'Content too long' }, 400);
@@ -456,7 +500,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 				if (!(await checkTurnstile(body, request.headers.get('CF-Connecting-IP') || '127.0.0.1'))) return jsonResponse({ error: 'Turnstile verification failed' }, 403);
 			}
 
-			const post = await db.prepare("SELECT id, author_id, min_comment_level FROM posts WHERE id = ? AND COALESCE(status, 'approved') = 'approved'").bind(postId).first<{ id: number; author_id: number; min_comment_level?: number }>();
+			const post = await db.prepare("SELECT id, author_id, min_comment_level FROM posts WHERE id = ? AND COALESCE(status, 'approved') = 'approved' AND COALESCE(deleted_at, 0) = 0").bind(postId).first<{ id: number; author_id: number; min_comment_level?: number }>();
 			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
 			const minCommentLevel = Math.max(0, Number(post.min_comment_level || 0));
 			const canCommentByLevel = Number(post.author_id) === Number(userPayload.id) || canAdmin(userPayload, 'comments') || Number((userPayload as any).level || 0) >= minCommentLevel;
@@ -464,7 +508,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 
 			let parentComment: { id: number; author_id: number; post_id: number } | null = null;
 			if (parent_id) {
-				parentComment = await db.prepare('SELECT id, author_id, post_id FROM comments WHERE id = ? AND post_id = ? AND COALESCE(status, \'approved\') = \'approved\'').bind(parent_id, postId).first<{ id: number; author_id: number; post_id: number }>();
+				parentComment = await db.prepare('SELECT id, author_id, post_id FROM comments WHERE id = ? AND post_id = ? AND COALESCE(status, \'approved\') = \'approved\' AND COALESCE(deleted_at, 0) = 0').bind(parent_id, postId).first<{ id: number; author_id: number; post_id: number }>();
 				if (!parentComment) return jsonResponse({ error: 'Parent comment not found' }, 404);
 			}
 
@@ -491,7 +535,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 	if (url.pathname.match(/^\/api\/posts\/\d+\/comments$/) && method === 'GET') {
 		const postId = url.pathname.split('/')[3];
 		try {
-			const post = await db.prepare("SELECT id, author_id, min_view_level FROM posts WHERE id = ? AND COALESCE(status, 'approved') = 'approved'").bind(postId).first<{ id: number; author_id: number; min_view_level?: number }>();
+			const post = await db.prepare("SELECT id, author_id, min_view_level FROM posts WHERE id = ? AND COALESCE(status, 'approved') = 'approved' AND COALESCE(deleted_at, 0) = 0").bind(postId).first<{ id: number; author_id: number; min_view_level?: number }>();
 			if (!post) return jsonResponse({ error: 'Post not found' }, 404);
 			let viewer: UserPayload | null = null;
 			try {
@@ -502,7 +546,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 				`SELECT comments.*, users.username, users.avatar_url, users.role
 				 FROM comments
 				 JOIN users ON comments.author_id = users.id
-				 WHERE post_id = ? AND COALESCE(comments.status, 'approved') = 'approved'
+				 WHERE post_id = ? AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0
 				 ORDER BY created_at ASC`
 			).bind(postId).all();
 			return jsonResponse(results);
@@ -515,12 +559,18 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		const id = url.pathname.split('/').pop();
 		try {
 			const userPayload = await loadAccessUser(await authenticate(request));
-			const comment = await db.prepare('SELECT author_id FROM comments WHERE id = ?').bind(id).first<any>();
+			const comment = await db.prepare('SELECT author_id FROM comments WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<any>();
 			if (!comment) return jsonResponse({ error: 'Comment not found' }, 404);
 			if (comment.author_id !== userPayload.id && !canAdmin(userPayload, 'comments')) return jsonResponse({ error: 'Unauthorized' }, 403);
-			await db.prepare('UPDATE user_progress_logs SET comment_id = NULL WHERE comment_id = ? OR comment_id IN (SELECT id FROM comments WHERE parent_id = ?)').bind(id, id).run();
-			await db.prepare('DELETE FROM comments WHERE parent_id = ?').bind(id).run();
-			await db.prepare('DELETE FROM comments WHERE id = ?').bind(id).run();
+			const now = Math.floor(Date.now() / 1000);
+			await db.prepare(`
+				WITH RECURSIVE comment_tree(id) AS (
+					SELECT id FROM comments WHERE id = ?
+					UNION ALL
+					SELECT c.id FROM comments c JOIN comment_tree ON c.parent_id = comment_tree.id
+				)
+				UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
+			`).bind(id, now, userPayload.id).run();
 			await security.logAudit(userPayload.id, 'DELETE_COMMENT', 'comment', String(id), {}, request);
 			invalidatePublicContent?.('comment:delete');
 			return jsonResponse({ success: true });
@@ -564,11 +614,11 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 		try {
 			const userPayload = await requireVerifiedUser(await authenticate(request));
 			const body = await request.json() as any;
-			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
-			if (!(await checkTurnstile(body, ip))) return jsonResponse({ error: 'Turnstile verification failed' }, 403);
-
 			const { category_id } = body;
 			const saveDraft = wantsDraft(body);
+			if (!saveDraft) ensureCanPublishContent(userPayload);
+			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+			if (!saveDraft && !(await checkTurnstile(body, ip))) return jsonResponse({ error: 'Turnstile verification failed' }, 403);
 			const normalized = normalizePostInput(body, saveDraft);
 			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
 			const title = normalized.title;
@@ -594,8 +644,18 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			).bind(userPayload.id, title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, postStatus).run();
 			const newPostId = meta?.last_row_id;
 			if (success && newPostId) {
+				try {
+					const nextContent = await persistPostPluginResources(newPostId, body, userPayload, content);
+					if (nextContent !== content) {
+						content = nextContent;
+						await db.prepare('UPDATE posts SET content = ? WHERE id = ?').bind(content.trim(), newPostId).run();
+					}
+				} catch (e) {
+					await db.prepare('DELETE FROM posts WHERE id = ?').bind(newPostId).run().catch(() => null);
+					throw e;
+				}
 				await syncPostTags(newPostId, tagIds);
-				await syncPostTranslations(newPostId, body, title, normalized.content, i18nEnabled);
+				await syncPostTranslations(newPostId, body, title, content, i18nEnabled);
 			}
 			if (success && postStatus === 'approved') await awardUserProgress(userPayload.id, 'create_post', { postId: newPostId });
 			if (success && newPostId && postStatus === 'pending') await createNotification(userPayload.id, 'post_pending', '帖子等待审核', '你的帖子已提交，管理员审核后会发布。', { postId: newPostId });

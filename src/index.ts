@@ -32,6 +32,7 @@ import { handleUserApi } from './api/user';
 import { handlePostsApi } from './api/posts';
 import { handleTaxonomyApi } from './api/taxonomy';
 import { handleAdminUsersApi } from './api/admin-users';
+import { handlePluginResourceApi } from './api/plugin-resources';
 import { verifyTurnstile } from './core/turnstile';
 import { hasControlCharacters, hasInvisibleCharacters, hasRestrictedKeywords, isVisuallyEmpty } from './core/validation';
 import { ensureBootstrap } from './services/bootstrap';
@@ -400,8 +401,10 @@ export default {
 			const cached = await kvGetUser<UserPayload>(kv, payload.id).catch(() => null);
 			if (cached) return cached;
 
-			const row = await db.prepare('SELECT id, email, role, verified, points, experience, level FROM users WHERE id = ?').bind(payload.id).first<DBUser>();
+			const row = await db.prepare('SELECT id, email, role, verified, points, experience, level, disabled_until, disabled_reason, muted_until, muted_reason FROM users WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(payload.id).first<DBUser>();
 			if (!row) throw new Error('Unauthorized');
+			const now = Math.floor(Date.now() / 1000);
+			if (Number((row as any).disabled_until || 0) > now) throw new Error('AccountDisabled');
 			const role = normalizeRole(row.role);
 			let permissions = permissionsForUser({ role });
 			if (role !== 'admin') {
@@ -417,6 +420,10 @@ export default {
 				points: Number((row as any).points || 0),
 				experience: Number((row as any).experience || 0),
 				level: Number((row as any).level || 1),
+				disabled_until: Number((row as any).disabled_until || 0),
+				disabled_reason: String((row as any).disabled_reason || ''),
+				muted_until: Number((row as any).muted_until || 0),
+				muted_reason: String((row as any).muted_reason || ''),
 			};
 			ctx.waitUntil(kvSetUser(kv, payload.id, result).catch(() => {}));
 			return result;
@@ -499,6 +506,12 @@ export default {
 			if (errString.includes('Forbidden')) {
 				return jsonResponse({ error: 'Forbidden' }, 403);
 			}
+			if (errString.includes('AccountDisabled')) {
+				return jsonResponse({ error: '账号已被禁用。', code: 'ACCOUNT_DISABLED' }, 403);
+			}
+			if (errString.includes('AccountMuted')) {
+				return jsonResponse({ error: '账号已被禁言。', code: 'ACCOUNT_MUTED' }, 403);
+			}
 			if (errString.includes('EmailVerificationRequired')) {
 				return jsonResponse({ error: '请先验证邮箱后再操作。', code: 'EMAIL_NOT_VERIFIED' }, 403);
 			}
@@ -524,6 +537,7 @@ export default {
 				js: row.js || '',
 				headHtml: row.head_html || '',
 				blockTypes: parseJsonValue(row.block_types, []),
+				resourceTypes: parseJsonValue(row.resource_types, []),
 				i18n: parseJsonValue(row.i18n, {}),
 				configSchema: parseJsonValue(row.config_schema, {}),
 				config: parseJsonValue(row.config, {}),
@@ -548,8 +562,8 @@ export default {
 			await db.prepare(
 				`INSERT INTO plugins (
 					id, slug, name, description, version, enabled, config, author, homepage, icon, type,
-					css, html, js, head_html, block_types, i18n, config_schema, permissions, tags, source_url, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+					css, html, js, head_html, block_types, resource_types, i18n, config_schema, permissions, tags, source_url, updated_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(id) DO UPDATE SET
 					slug = excluded.slug,
 					name = excluded.name,
@@ -565,6 +579,7 @@ export default {
 					js = excluded.js,
 					head_html = excluded.head_html,
 					block_types = excluded.block_types,
+					resource_types = excluded.resource_types,
 					i18n = excluded.i18n,
 					config_schema = excluded.config_schema,
 					permissions = excluded.permissions,
@@ -588,6 +603,7 @@ export default {
 				manifest.js,
 				manifest.head_html,
 				manifest.block_types,
+				manifest.resource_types,
 				manifest.i18n,
 				manifest.config_schema,
 				manifest.permissions,
@@ -628,7 +644,7 @@ export default {
 			try {
 				const payload = await authenticate(request);
 				const user = await db.prepare(
-					'SELECT id, email, username, role, verified, avatar_url, email_notifications, show_public_posts, points, experience, level, last_checkin_date, created_at, pending_email FROM users WHERE id = ?'
+					'SELECT id, email, username, role, verified, avatar_url, email_notifications, show_public_posts, points, experience, level, last_checkin_date, created_at, pending_email FROM users WHERE id = ? AND COALESCE(deleted_at, 0) = 0'
 				).bind(payload.id).first<SiteUser>();
 				if (!user) return null;
 				(user as any).permissions = (await loadAccessUser(payload)).permissions;
@@ -890,7 +906,7 @@ tick();setInterval(tick,1000);
 			const map = translations.get('category:all') || {};
 			const value = (key: string, fallbackValue: string) =>
 				map[key]?.[locale] || map[key]?.[fallback] || map[key]?.['zh-CN'] || map[key]?.['en-US'] || fallbackValue;
-			const count = totalPosts ?? Number(await db.prepare("SELECT COUNT(*) AS count FROM posts WHERE COALESCE(status, 'approved') = 'approved'").first<number>('count') || 0);
+			const count = totalPosts ?? Number(await db.prepare("SELECT COUNT(*) AS count FROM posts WHERE COALESCE(status, 'approved') = 'approved' AND COALESCE(deleted_at, 0) = 0").first<number>('count') || 0);
 			return {
 				id: 'all' as unknown as number,
 				name: value('name', systemTranslations['nav.allPosts'] || (locale === 'zh-CN' ? '全部' : 'All')),
@@ -1391,6 +1407,23 @@ tick();setInterval(tick,1000);
 		});
 		if (taxonomyApiResponse) return taxonomyApiResponse;
 
+		const pluginResourceApiResponse = await handlePluginResourceApi({
+			request,
+			url,
+			method,
+			env: runtimeEnvForLinks as Env,
+			db,
+			jsonResponse,
+			handleError,
+			authenticate,
+			requestLocale,
+			normalizeLocale,
+			getEnabledLanguages,
+			getSystemTranslations,
+			loadLocalizedMaps,
+		});
+		if (pluginResourceApiResponse) return pluginResourceApiResponse;
+
 		const adminUsersApiResponse = await handleAdminUsersApi({
 			request,
 			url,
@@ -1416,19 +1449,10 @@ tick();setInterval(tick,1000);
 				const { ids } = await request.json() as { ids: number[] };
 				if (!ids || !Array.isArray(ids) || ids.length === 0) return jsonResponse({ error: 'Missing post ids' }, 400);
 
+				const now = Math.floor(Date.now() / 1000);
 				for (const id of ids) {
-					const post = await db.prepare('SELECT content, author_id FROM posts WHERE id = ?').bind(id).first();
-					if (post) {
-						const imageUrls = extractImageUrls(post.content as string);
-						if (imageUrls.length > 0) {
-							ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, post.author_id as number))).catch(err => console.error('Failed to delete post images', err)));
-						}
-					}
-					await db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
-					await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(id, id).run();
-					await db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
-					await db.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(id).run();
-					await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
+					await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+					await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
 				}
 				await security.logAudit(userPayload.id, 'ADMIN_BULK_DELETE_POSTS', 'post', ids.join(','), {}, request);
 				invalidatePublicContent('admin:posts:bulk-delete');
@@ -1444,20 +1468,9 @@ tick();setInterval(tick,1000);
 			try {
 				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
 
-				// Delete images in post
-				const post = await db.prepare('SELECT content, author_id FROM posts WHERE id = ?').bind(id).first();
-				if (post) {
-					const imageUrls = extractImageUrls(post.content as string);
-					if (imageUrls.length > 0) {
-						ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, post.author_id as number))).catch(err => console.error('Failed to delete post images', err)));
-					}
-				}
-
-				await db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
-				await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(id, id).run();
-				await db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
-				await db.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(id).run();
-				await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
+				const now = Math.floor(Date.now() / 1000);
+				await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+				await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
 				
 				await security.logAudit(userPayload.id, 'ADMIN_DELETE_POST', 'post', String(id), {}, request);
 				invalidatePublicContent('admin:post:delete');
@@ -1610,18 +1623,15 @@ tick();setInterval(tick,1000);
 				let deleted = 0;
 				for (const item of items) {
 					if (item.type === 'post') {
-						const post = await db.prepare('SELECT content, author_id FROM posts WHERE id = ?').bind(item.id).first();
+						const post = await db.prepare('SELECT id FROM posts WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(item.id).first();
 						if (!post) continue;
-						const imageUrls = extractImageUrls(post.content as string);
-						if (imageUrls.length > 0) ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, post.author_id as number))).catch(err => console.error('Failed to delete post images', err)));
-						await db.prepare('DELETE FROM likes WHERE post_id = ?').bind(item.id).run();
-						await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(item.id, item.id).run();
-						await db.prepare('DELETE FROM comments WHERE post_id = ?').bind(item.id).run();
-						await db.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(item.id).run();
-						await db.prepare('DELETE FROM posts WHERE id = ?').bind(item.id).run();
+						const now = Math.floor(Date.now() / 1000);
+						await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, item.id).run();
+						await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, item.id).run();
 						deleted++;
 					} else {
-						const tree = await db.prepare(`
+						const now = Math.floor(Date.now() / 1000);
+						const changed = await db.prepare(`
 							WITH RECURSIVE comment_tree(id, depth) AS (
 								SELECT id, 0 FROM comments WHERE id = ?
 								UNION ALL
@@ -1629,13 +1639,9 @@ tick();setInterval(tick,1000);
 								FROM comments c
 								JOIN comment_tree ON c.parent_id = comment_tree.id
 							)
-							SELECT id FROM comment_tree ORDER BY depth DESC
-						`).bind(item.id).all<{ id: number }>();
-						if (!(tree.results || []).length) continue;
-						for (const row of tree.results || []) {
-							await db.prepare('UPDATE user_progress_logs SET comment_id = NULL WHERE comment_id = ?').bind(row.id).run();
-							await db.prepare('DELETE FROM comments WHERE id = ?').bind(row.id).run();
-						}
+							UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
+						`).bind(item.id, now, userPayload.id).run();
+						if (!changed.success) continue;
 						deleted++;
 					}
 				}
@@ -1653,19 +1659,13 @@ tick();setInterval(tick,1000);
 			try {
 				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
 				if (type === 'post') {
-					const post = await db.prepare('SELECT content, author_id FROM posts WHERE id = ?').bind(id).first();
-					if (post) {
-						const imageUrls = extractImageUrls(post.content as string);
-						if (imageUrls.length > 0) ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, post.author_id as number))).catch(err => console.error('Failed to delete post images', err)));
-					}
-					await db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
-					await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(id, id).run();
-					await db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
-					await db.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(id).run();
-					await db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
+					const now = Math.floor(Date.now() / 1000);
+					await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+					await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
 					await security.logAudit(userPayload.id, 'MODERATION_DELETE_POST', 'post', String(id), {}, request);
 				} else {
-					const tree = await db.prepare(`
+					const now = Math.floor(Date.now() / 1000);
+					await db.prepare(`
 						WITH RECURSIVE comment_tree(id, depth) AS (
 							SELECT id, 0 FROM comments WHERE id = ?
 							UNION ALL
@@ -1673,12 +1673,8 @@ tick();setInterval(tick,1000);
 							FROM comments c
 							JOIN comment_tree ON c.parent_id = comment_tree.id
 						)
-						SELECT id FROM comment_tree ORDER BY depth DESC
-					`).bind(id).all<{ id: number }>();
-					for (const row of tree.results || []) {
-						await db.prepare('UPDATE user_progress_logs SET comment_id = NULL WHERE comment_id = ?').bind(row.id).run();
-						await db.prepare('DELETE FROM comments WHERE id = ?').bind(row.id).run();
-					}
+						UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
+					`).bind(id, now, userPayload.id).run();
 					await security.logAudit(userPayload.id, 'MODERATION_DELETE_COMMENT', 'comment', String(id), {}, request);
 				}
 				invalidatePublicContent(`moderation:${type}:delete`);
@@ -1701,7 +1697,8 @@ tick();setInterval(tick,1000);
 
 				let deleted = 0;
 				for (const rootId of ids) {
-					const tree = await db.prepare(`
+					const now = Math.floor(Date.now() / 1000);
+					const result = await db.prepare(`
 						WITH RECURSIVE comment_tree(id, depth) AS (
 							SELECT id, 0 FROM comments WHERE id = ?
 							UNION ALL
@@ -1709,14 +1706,9 @@ tick();setInterval(tick,1000);
 							FROM comments c
 							JOIN comment_tree ON c.parent_id = comment_tree.id
 						)
-						SELECT id FROM comment_tree ORDER BY depth DESC
-					`).bind(rootId).all<{ id: number }>();
-					const treeIds = tree.results?.map((row) => row.id) || [];
-					for (const commentId of treeIds) {
-						await db.prepare('UPDATE user_progress_logs SET comment_id = NULL WHERE comment_id = ?').bind(commentId).run();
-						await db.prepare('DELETE FROM comments WHERE id = ?').bind(commentId).run();
-						deleted += 1;
-					}
+						UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
+					`).bind(rootId, now, userPayload.id).run();
+					deleted += Number((result.meta as any)?.changes || 0);
 				}
 				await security.logAudit(userPayload.id, 'ADMIN_BULK_DELETE_COMMENTS', 'comment', ids.join(','), { deleted }, request);
 				if (deleted) invalidatePublicContent('admin:comments:bulk-delete');
@@ -1732,7 +1724,8 @@ tick();setInterval(tick,1000);
 			try {
 				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
 
-				const tree = await db.prepare(`
+				const now = Math.floor(Date.now() / 1000);
+				await db.prepare(`
 					WITH RECURSIVE comment_tree(id, depth) AS (
 						SELECT id, 0 FROM comments WHERE id = ?
 						UNION ALL
@@ -1740,12 +1733,8 @@ tick();setInterval(tick,1000);
 						FROM comments c
 						JOIN comment_tree ON c.parent_id = comment_tree.id
 					)
-					SELECT id FROM comment_tree ORDER BY depth DESC
-				`).bind(id).all<{ id: number }>();
-				for (const row of tree.results || []) {
-					await db.prepare('UPDATE user_progress_logs SET comment_id = NULL WHERE comment_id = ?').bind(row.id).run();
-					await db.prepare('DELETE FROM comments WHERE id = ?').bind(row.id).run();
-				}
+					UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
+				`).bind(id, now, userPayload.id).run();
 				
 				await security.logAudit(userPayload.id, 'ADMIN_DELETE_COMMENT', 'comment', String(id), {}, request);
 				invalidatePublicContent('admin:comment:delete');

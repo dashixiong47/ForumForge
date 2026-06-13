@@ -3,8 +3,6 @@ import type { DBCount, DBSetting, DBUser } from '../db/types';
 import { hashPassword, generateToken } from '../core/password';
 import { hasControlCharacters, hasInvisibleCharacters, hasRestrictedKeywords, isVisuallyEmpty } from '../core/validation';
 import { generateIdenticon } from '../utils/identicon';
-import { extractImageUrls } from '../utils/media';
-import { deleteImage, type S3Env } from '../integrations/s3';
 import { sendEmail } from '../integrations/smtp';
 import { buildEmailOtpEmail } from '../emails/templates';
 import type { EmailLocale } from '../emails/templates';
@@ -208,29 +206,12 @@ export async function handleUserApi(ctx: UserApiContext): Promise<Response | nul
 			const passwordHash = await hashPassword(password);
 			if (user.password !== passwordHash) return jsonResponse({ error: 'Invalid password' }, 401);
 
-			const posts: any = await db.prepare('SELECT content FROM posts WHERE author_id = ?').bind(userId).all();
-			const deletionPromises: Promise<any>[] = [];
-			if (user.avatar_url) deletionPromises.push(deleteImage(env as unknown as S3Env, user.avatar_url, userId));
-			if (posts.results) {
-				for (const post of posts.results) {
-					const imageUrls = extractImageUrls(post.content as string);
-					imageUrls.forEach(url => deletionPromises.push(deleteImage(env as unknown as S3Env, url, userId)));
-				}
-			}
-			if (deletionPromises.length > 0) {
-				executionCtx.waitUntil(Promise.all(deletionPromises).catch(err => console.error('Failed to delete user images', err)));
-			}
-
-			await db.prepare('DELETE FROM likes WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(userId).run();
-			await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?) OR comment_id IN (SELECT id FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?))').bind(userId, userId).run();
-			await db.prepare('DELETE FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(userId).run();
-			await db.prepare('DELETE FROM post_tags WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(userId).run();
-			await db.prepare('DELETE FROM likes WHERE user_id = ?').bind(userId).run();
-			await db.prepare('DELETE FROM user_progress_logs WHERE user_id = ?').bind(userId).run();
-			await db.prepare('UPDATE user_progress_logs SET comment_id = NULL WHERE comment_id IN (SELECT id FROM comments WHERE author_id = ?)').bind(userId).run();
-			await db.prepare('DELETE FROM comments WHERE author_id = ?').bind(userId).run();
-			await db.prepare('DELETE FROM posts WHERE author_id = ?').bind(userId).run();
-			await db.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();
+			const now = Math.floor(Date.now() / 1000);
+			await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?) AND COALESCE(deleted_at, 0) = 0').bind(now, userId, userId).run();
+			await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE author_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userId, userId).run();
+			await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE author_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userId, userId).run();
+			await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId).run();
+			await db.prepare('UPDATE users SET deleted_at = ?, deleted_by = ?, disabled_until = ?, disabled_reason = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userId, now + 3650 * 86400, 'self_deleted', userId).run();
 
 			await security.logAudit(userPayload.id, 'DELETE_ACCOUNT', 'user', String(userId), {}, request);
 			return jsonResponse({ success: true });

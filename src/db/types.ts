@@ -22,6 +22,12 @@ export interface DBUser {
 	level?: number;
 	last_checkin_date?: string | null;
 	permissions?: string;
+	disabled_until?: number | null;
+	disabled_reason?: string | null;
+	muted_until?: number | null;
+	muted_reason?: string | null;
+	deleted_at?: number | null;
+	deleted_by?: number | null;
 }
 
 export interface PostAuthorInfo {
@@ -65,6 +71,7 @@ export interface DBPlugin {
 	js?: string;
 	head_html?: string;
 	block_types?: string;
+	resource_types?: string;
 	i18n?: string;
 	config_schema?: string;
 	permissions?: string;
@@ -72,6 +79,8 @@ export interface DBPlugin {
 	source_url?: string;
 	share_token?: string;
 	share_notify?: number;
+	deleted_at?: number | null;
+	deleted_by?: number | null;
 	created_at?: string;
 	updated_at?: string;
 }

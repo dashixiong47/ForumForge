@@ -609,6 +609,7 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 			const categoryColumns = await tableColumns('categories');
 			const postColumns = await tableColumns('posts');
 			const commentColumns = await tableColumns('comments');
+			const pluginResourceColumns = await tableColumns('plugin_resources');
 			const profileAlterStmts = [
 				...[
 					{ name: 'points', stmt: 'ALTER TABLE users ADD COLUMN points INTEGER DEFAULT 0' },
@@ -616,7 +617,13 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 					{ name: 'level', stmt: 'ALTER TABLE users ADD COLUMN level INTEGER DEFAULT 1' },
 					{ name: 'last_checkin_date', stmt: 'ALTER TABLE users ADD COLUMN last_checkin_date TEXT' },
 					{ name: 'permissions', stmt: "ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT '[]'" },
-					{ name: 'show_public_posts', stmt: 'ALTER TABLE users ADD COLUMN show_public_posts INTEGER DEFAULT 1' }
+					{ name: 'show_public_posts', stmt: 'ALTER TABLE users ADD COLUMN show_public_posts INTEGER DEFAULT 1' },
+					{ name: 'disabled_until', stmt: 'ALTER TABLE users ADD COLUMN disabled_until INTEGER DEFAULT 0' },
+					{ name: 'disabled_reason', stmt: "ALTER TABLE users ADD COLUMN disabled_reason TEXT DEFAULT ''" },
+					{ name: 'muted_until', stmt: 'ALTER TABLE users ADD COLUMN muted_until INTEGER DEFAULT 0' },
+					{ name: 'muted_reason', stmt: "ALTER TABLE users ADD COLUMN muted_reason TEXT DEFAULT ''" },
+					{ name: 'deleted_at', stmt: 'ALTER TABLE users ADD COLUMN deleted_at INTEGER DEFAULT 0' },
+					{ name: 'deleted_by', stmt: 'ALTER TABLE users ADD COLUMN deleted_by INTEGER DEFAULT 0' }
 				].filter((item) => userColumns.size && !userColumns.has(item.name)).map((item) => item.stmt),
 				...[
 					{ name: 'description', stmt: "ALTER TABLE categories ADD COLUMN description TEXT DEFAULT ''" },
@@ -636,12 +643,18 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 					.filter((item) => postColumns.size && !postColumns.has(item.name)).map((item) => item.stmt),
 				...[
 					{ name: 'min_view_level', stmt: 'ALTER TABLE posts ADD COLUMN min_view_level INTEGER DEFAULT 0' },
-					{ name: 'min_comment_level', stmt: 'ALTER TABLE posts ADD COLUMN min_comment_level INTEGER DEFAULT 0' }
+					{ name: 'min_comment_level', stmt: 'ALTER TABLE posts ADD COLUMN min_comment_level INTEGER DEFAULT 0' },
+					{ name: 'deleted_at', stmt: 'ALTER TABLE posts ADD COLUMN deleted_at INTEGER DEFAULT 0' },
+					{ name: 'deleted_by', stmt: 'ALTER TABLE posts ADD COLUMN deleted_by INTEGER DEFAULT 0' }
 				].filter((item) => postColumns.size && !postColumns.has(item.name)).map((item) => item.stmt),
 				...[{ name: 'status', stmt: "ALTER TABLE comments ADD COLUMN status TEXT DEFAULT 'approved'" }]
 					.filter((item) => commentColumns.size && !commentColumns.has(item.name)).map((item) => item.stmt),
 				...[{ name: 'rejection_reason', stmt: "ALTER TABLE comments ADD COLUMN rejection_reason TEXT DEFAULT ''" }]
-					.filter((item) => commentColumns.size && !commentColumns.has(item.name)).map((item) => item.stmt)
+					.filter((item) => commentColumns.size && !commentColumns.has(item.name)).map((item) => item.stmt),
+				...[
+					{ name: 'deleted_at', stmt: 'ALTER TABLE comments ADD COLUMN deleted_at INTEGER DEFAULT 0' },
+					{ name: 'deleted_by', stmt: 'ALTER TABLE comments ADD COLUMN deleted_by INTEGER DEFAULT 0' }
+				].filter((item) => commentColumns.size && !commentColumns.has(item.name)).map((item) => item.stmt)
 			];
 			const pluginAlterStmts = pluginColumns.size ? [
 				{ name: 'slug', stmt: "ALTER TABLE plugins ADD COLUMN slug TEXT DEFAULT ''" },
@@ -654,14 +667,22 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 				{ name: 'js', stmt: "ALTER TABLE plugins ADD COLUMN js TEXT DEFAULT ''" },
 				{ name: 'head_html', stmt: "ALTER TABLE plugins ADD COLUMN head_html TEXT DEFAULT ''" },
 				{ name: 'block_types', stmt: "ALTER TABLE plugins ADD COLUMN block_types TEXT DEFAULT '[]'" },
+				{ name: 'resource_types', stmt: "ALTER TABLE plugins ADD COLUMN resource_types TEXT DEFAULT '[]'" },
 				{ name: 'i18n', stmt: "ALTER TABLE plugins ADD COLUMN i18n TEXT DEFAULT '{}'" },
 				{ name: 'config_schema', stmt: "ALTER TABLE plugins ADD COLUMN config_schema TEXT DEFAULT '{}'" },
 				{ name: 'permissions', stmt: "ALTER TABLE plugins ADD COLUMN permissions TEXT DEFAULT '[]'" },
 				{ name: 'tags', stmt: "ALTER TABLE plugins ADD COLUMN tags TEXT DEFAULT '[]'" },
 				{ name: 'source_url', stmt: "ALTER TABLE plugins ADD COLUMN source_url TEXT DEFAULT ''" },
 				{ name: 'share_token', stmt: "ALTER TABLE plugins ADD COLUMN share_token TEXT DEFAULT ''" },
-				{ name: 'share_notify', stmt: "ALTER TABLE plugins ADD COLUMN share_notify INTEGER DEFAULT 1" }
+				{ name: 'share_notify', stmt: "ALTER TABLE plugins ADD COLUMN share_notify INTEGER DEFAULT 1" },
+				{ name: 'deleted_at', stmt: 'ALTER TABLE plugins ADD COLUMN deleted_at INTEGER DEFAULT 0' },
+				{ name: 'deleted_by', stmt: 'ALTER TABLE plugins ADD COLUMN deleted_by INTEGER DEFAULT 0' }
 			].filter((item) => !pluginColumns.has(item.name)).map((item) => item.stmt) : [];
+			const pluginResourceAlterStmts = pluginResourceColumns.size ? [
+				{ name: 'payload_size', stmt: 'ALTER TABLE plugin_resources ADD COLUMN payload_size INTEGER NOT NULL DEFAULT 0' },
+				{ name: 'storage_provider', stmt: "ALTER TABLE plugin_resources ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'd1'" },
+				{ name: 'storage_key', stmt: "ALTER TABLE plugin_resources ADD COLUMN storage_key TEXT NOT NULL DEFAULT ''" }
+			].filter((item) => !pluginResourceColumns.has(item.name)).map((item) => item.stmt) : [];
 			const i18nSchemaStmts = [
 				`CREATE TABLE IF NOT EXISTS languages (
   code TEXT PRIMARY KEY,
@@ -784,6 +805,7 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
   js TEXT DEFAULT '',
   head_html TEXT DEFAULT '',
   block_types TEXT DEFAULT '[]',
+  resource_types TEXT DEFAULT '[]',
   i18n TEXT DEFAULT '{}',
   config_schema TEXT DEFAULT '{}',
   permissions TEXT DEFAULT '[]',
@@ -791,6 +813,8 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
   source_url TEXT DEFAULT '',
   share_token TEXT DEFAULT '',
   share_notify INTEGER DEFAULT 1,
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );`,
@@ -809,16 +833,37 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 );`,
 				`CREATE INDEX IF NOT EXISTS idx_plugin_share_events_token ON plugin_share_events(token, created_at);`,
 				`CREATE INDEX IF NOT EXISTS idx_plugin_share_events_plugin ON plugin_share_events(plugin_id, created_at);`,
+				`CREATE TABLE IF NOT EXISTS plugin_resources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plugin_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  author_id INTEGER NOT NULL,
+  post_id INTEGER,
+  title TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL DEFAULT '',
+  payload_size INTEGER NOT NULL DEFAULT 0,
+  storage_provider TEXT NOT NULL DEFAULT 'd1',
+  storage_key TEXT NOT NULL DEFAULT '',
+  meta TEXT NOT NULL DEFAULT '{}',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);`,
+				`CREATE INDEX IF NOT EXISTS idx_plugin_resources_type_id ON plugin_resources(type, id);`,
+				`CREATE INDEX IF NOT EXISTS idx_plugin_resources_plugin ON plugin_resources(plugin_id, created_at);`,
+				`CREATE INDEX IF NOT EXISTS idx_plugin_resources_author ON plugin_resources(author_id, created_at);`,
+				`CREATE INDEX IF NOT EXISTS idx_plugin_resources_post ON plugin_resources(post_id);`,
 				...pluginAlterStmts,
+				...pluginResourceAlterStmts,
 				`UPDATE plugins SET slug = id WHERE slug IS NULL OR slug = '';`,
 				...BUILTIN_PLUGINS.map((plugin) =>
-					`INSERT INTO plugins (id, slug, name, description, version, enabled, config, type, css, html, js, i18n) VALUES (` +
+					`INSERT INTO plugins (id, slug, name, description, version, enabled, config, type, css, html, js, resource_types, i18n) VALUES (` +
 					`'${plugin.id}', '${plugin.id}', '${plugin.name}', '${plugin.description.replace(/'/g, "''")}', '${plugin.version}', ${plugin.enabled}, ` +
-					`'${plugin.config.replace(/'/g, "''")}', 'system', '${plugin.css.replace(/'/g, "''")}', '${plugin.html.replace(/'/g, "''")}', '${plugin.js.replace(/'/g, "''")}', '${JSON.stringify(plugin.i18n).replace(/'/g, "''")}') ` +
+					`'${plugin.config.replace(/'/g, "''")}', 'system', '${plugin.css.replace(/'/g, "''")}', '${plugin.html.replace(/'/g, "''")}', '${plugin.js.replace(/'/g, "''")}', '${JSON.stringify((plugin as any).resourceTypes || []).replace(/'/g, "''")}', '${JSON.stringify(plugin.i18n).replace(/'/g, "''")}') ` +
 					`ON CONFLICT(id) DO UPDATE SET ` +
 					`css = CASE WHEN plugins.css IS NULL OR plugins.css = '' THEN excluded.css ELSE plugins.css END, ` +
 					`html = CASE WHEN plugins.html IS NULL OR plugins.html = '' THEN excluded.html ELSE plugins.html END, ` +
 					`js = CASE WHEN plugins.js IS NULL OR plugins.js = '' THEN excluded.js ELSE plugins.js END, ` +
+					`resource_types = CASE WHEN plugins.resource_types IS NULL OR plugins.resource_types = '[]' OR plugins.resource_types = '' THEN excluded.resource_types ELSE plugins.resource_types END, ` +
 					`i18n = CASE WHEN plugins.i18n IS NULL OR plugins.i18n = '{}' OR plugins.i18n = '' THEN excluded.i18n ELSE plugins.i18n END, ` +
 					`config = CASE WHEN plugins.config IS NULL OR plugins.config = '{}' OR plugins.config = '' THEN excluded.config ELSE plugins.config END;`
 				)
@@ -1015,6 +1060,12 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
   level INTEGER DEFAULT 1,
   last_checkin_date TEXT,
   permissions TEXT DEFAULT '[]',
+  disabled_until INTEGER DEFAULT 0,
+  disabled_reason TEXT DEFAULT '',
+  muted_until INTEGER DEFAULT 0,
+  muted_reason TEXT DEFAULT '',
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );`,
 				`CREATE TABLE IF NOT EXISTS categories (
@@ -1043,6 +1094,8 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
   status TEXT DEFAULT 'approved',
   rejection_reason TEXT DEFAULT '',
   view_count INTEGER NOT NULL DEFAULT 0,
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (author_id) REFERENCES users(id),
   FOREIGN KEY (category_id) REFERENCES categories(id)
@@ -1055,6 +1108,8 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
   content TEXT NOT NULL,
   status TEXT DEFAULT 'approved',
   rejection_reason TEXT DEFAULT '',
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (post_id) REFERENCES posts(id),
   FOREIGN KEY (parent_id) REFERENCES comments(id),

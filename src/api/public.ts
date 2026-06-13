@@ -41,7 +41,7 @@ export async function handlePublicApi(ctx: ApiContext): Promise<Response | null>
 				db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first<DBSetting>(),
 				db.prepare("SELECT value FROM settings WHERE key = 'default_locale'").first<DBSetting>(),
 				db.prepare("SELECT value FROM settings WHERE key = 'site_name'").first<DBSetting>(),
-				db.prepare('SELECT COUNT(*) as count FROM users').first('count'),
+				db.prepare('SELECT COUNT(*) as count FROM users WHERE COALESCE(deleted_at, 0) = 0').first('count'),
 				getEnabledLanguages(),
 				db.prepare("SELECT value FROM settings WHERE key = 'turnstile_site_key'").first<DBSetting>(),
 				db.prepare("SELECT value FROM settings WHERE key = 'turnstile_secret_key'").first<DBSetting>(),

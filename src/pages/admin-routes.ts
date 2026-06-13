@@ -200,19 +200,20 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 
 			if (url.pathname === '/admin') {
 				const [users, posts, comments, plugins, topPosts, catStats, newUsers, visits7, countries7, visits30, device30, topPaths30, latestVisits] = await Promise.all([
-					db.prepare('SELECT COUNT(*) as count FROM users').first<DBCount>(),
-					db.prepare('SELECT COUNT(*) as count FROM posts').first<DBCount>(),
-					db.prepare('SELECT COUNT(*) as count FROM comments').first<DBCount>(),
-					db.prepare('SELECT COUNT(*) as count FROM plugins').first<DBCount>(),
-					db.prepare('SELECT id, title, view_count FROM posts ORDER BY view_count DESC LIMIT 8').all(),
+					db.prepare('SELECT COUNT(*) as count FROM users WHERE COALESCE(deleted_at, 0) = 0').first<DBCount>(),
+					db.prepare('SELECT COUNT(*) as count FROM posts WHERE COALESCE(deleted_at, 0) = 0').first<DBCount>(),
+					db.prepare('SELECT COUNT(*) as count FROM comments WHERE COALESCE(deleted_at, 0) = 0').first<DBCount>(),
+					db.prepare('SELECT COUNT(*) as count FROM plugins WHERE COALESCE(deleted_at, 0) = 0').first<DBCount>(),
+					db.prepare('SELECT id, title, view_count FROM posts WHERE COALESCE(deleted_at, 0) = 0 ORDER BY view_count DESC LIMIT 8').all(),
 					db.prepare(
 						`SELECT COALESCE(c.name, '未分类') AS name, COUNT(p.id) AS count
 						   FROM posts p
 						   LEFT JOIN categories c ON c.id = p.category_id
+						  WHERE COALESCE(p.deleted_at, 0) = 0
 						  GROUP BY COALESCE(c.name, '未分类')
 						  ORDER BY count DESC`
 					).all(),
-					db.prepare('SELECT username, email, created_at FROM users ORDER BY created_at DESC LIMIT 8').all(),
+					db.prepare('SELECT username, email, created_at FROM users WHERE COALESCE(deleted_at, 0) = 0 ORDER BY created_at DESC LIMIT 8').all(),
 					db.prepare(
 						`SELECT date_bucket AS day, COUNT(*) AS visits, COUNT(DISTINCT NULLIF(ip, '')) AS visitors
 						   FROM visit_events
@@ -351,7 +352,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 
 			if (url.pathname === '/admin/plugins') {
 				const [pluginsRes, installsRes] = await Promise.all([
-					db.prepare('SELECT * FROM plugins ORDER BY name ASC').all(),
+					db.prepare('SELECT * FROM plugins WHERE COALESCE(deleted_at, 0) = 0 ORDER BY name ASC').all(),
 					db.prepare('SELECT plugin_id, COUNT(*) AS count FROM plugin_share_events GROUP BY plugin_id').all()
 				]);
 				const installMap = new Map(((installsRes.results || []) as any[]).map((row) => [String(row.plugin_id), Number(row.count || 0)]));
@@ -368,7 +369,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 			const pluginEditorMatch = url.pathname.match(/^\/admin\/plugins\/([^/]+)\/editor$/);
 			if (pluginEditorMatch) {
 				const id = normalizePluginId(decodeURIComponent(pluginEditorMatch[1] || ''));
-				const foundPlugin = await db.prepare('SELECT * FROM plugins WHERE id = ? OR slug = ?').bind(id, id).first<DBPlugin>();
+				const foundPlugin = await db.prepare('SELECT * FROM plugins WHERE (id = ? OR slug = ?) AND COALESCE(deleted_at, 0) = 0').bind(id, id).first<DBPlugin>();
 				const plugin = foundPlugin ? hydrateBuiltinPluginRow(foundPlugin) : null;
 				if (!plugin) {
 					return adminHtmlResponse(renderSimpleAdminTable(
@@ -382,7 +383,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 						{ titleKey: 'admin.plugins.notFoundTitle', subtitleKey: 'admin.plugins.notFoundSubtitle', emptyKey: 'common.none' }
 					), 404);
 				}
-				return adminHtmlResponse(renderPluginEditor(userPayload, plugin));
+				return adminHtmlResponse(renderPluginEditor(userPayload, plugin, requestLocale()));
 			}
 
 			if (url.pathname === '/admin/i18n') {
@@ -509,8 +510,8 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get('pageSize') || 50)));
 				const offset = (page - 1) * pageSize;
 				const [users, countRow, roleRows] = await Promise.all([
-					db.prepare('SELECT id, email, username, role, permissions, verified, created_at, avatar_url, points, experience, level FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(pageSize, offset).all(),
-					db.prepare('SELECT COUNT(*) AS total FROM users').first<{ total: number }>(),
+					db.prepare('SELECT id, email, username, role, permissions, verified, created_at, avatar_url, points, experience, level, disabled_until, disabled_reason, muted_until, muted_reason FROM users WHERE COALESCE(deleted_at, 0) = 0 ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(pageSize, offset).all(),
+					db.prepare('SELECT COUNT(*) AS total FROM users WHERE COALESCE(deleted_at, 0) = 0').first<{ total: number }>(),
 					db.prepare('SELECT role FROM role_permissions').all()
 				]);
 				const roleOrder = new Map([['admin', 1], ['manager', 2], ['moderator', 3], ['user', 4]]);
@@ -541,7 +542,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				await db.batch(seedStmts).catch(() => {});
 				const [roleRows, userRows, translationRows] = await Promise.all([
 					db.prepare('SELECT role, permissions FROM role_permissions').all(),
-					db.prepare('SELECT role FROM users').all(),
+					db.prepare('SELECT role FROM users WHERE COALESCE(deleted_at, 0) = 0').all(),
 					db.prepare("SELECT scope, locale, value FROM translations WHERE scope LIKE 'role:%' AND key = 'name'").all(),
 				]);
 				const counts = new Map<string, number>();
@@ -585,7 +586,8 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 					   LEFT JOIN translations cf ON cf.scope = ('category:' || c.id) AND cf.key = 'name' AND cf.locale = ?
 					   LEFT JOIN post_translations pt ON pt.post_id = p.id AND pt.locale = ?
 					   LEFT JOIN post_translations pf ON pf.post_id = p.id AND pf.locale = ?
-					   LEFT JOIN comments cm ON cm.post_id = p.id
+					   LEFT JOIN comments cm ON cm.post_id = p.id AND COALESCE(cm.deleted_at, 0) = 0
+					  WHERE COALESCE(p.deleted_at, 0) = 0
 					  GROUP BY p.id
 					  ORDER BY p.created_at DESC
 					  LIMIT ? OFFSET ?`
@@ -597,7 +599,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 						   LEFT JOIN translations cf ON cf.scope = ('category:' || c.id) AND cf.key = 'name' AND cf.locale = ?
 						  ORDER BY COALESCE(c.sort_order, c.id * 10) ASC, c.created_at ASC, c.id ASC`
 					).bind(locale, fallbackLocale).all(),
-					db.prepare('SELECT COUNT(*) AS total FROM posts').first<{ total: number }>()
+					db.prepare('SELECT COUNT(*) AS total FROM posts WHERE COALESCE(deleted_at, 0) = 0').first<{ total: number }>()
 				]);
 				return adminHtmlResponse(renderAdminPosts(userPayload, {
 					posts: (posts.results || []) as any[],
@@ -618,10 +620,11 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 					   FROM comments cm
 					   JOIN users u ON u.id = cm.author_id
 					   JOIN posts p ON p.id = cm.post_id
+					  WHERE COALESCE(cm.deleted_at, 0) = 0 AND COALESCE(p.deleted_at, 0) = 0
 					  ORDER BY cm.created_at DESC
 					  LIMIT ? OFFSET ?`
 				).bind(pageSize, offset).all(),
-				db.prepare('SELECT COUNT(*) AS total FROM comments').first<{ total: number }>()
+				db.prepare('SELECT COUNT(*) AS total FROM comments WHERE COALESCE(deleted_at, 0) = 0').first<{ total: number }>()
 				]);
 				return adminHtmlResponse(renderAdminComments(userPayload, {
 					comments: (comments.results || []) as any[],
@@ -641,17 +644,17 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 						`SELECT * FROM (
 							SELECT 'post' AS type, p.id, p.title, p.content, p.status, p.created_at, p.author_id, NULL AS post_id, NULL AS post_title, u.username
 							  FROM posts p JOIN users u ON u.id = p.author_id
-							 WHERE COALESCE(p.status, 'approved') = ?
+							 WHERE COALESCE(p.status, 'approved') = ? AND COALESCE(p.deleted_at, 0) = 0
 							UNION ALL
 							SELECT 'comment' AS type, cm.id, p.title, cm.content, cm.status, cm.created_at, cm.author_id, cm.post_id, p.title AS post_title, u.username
 							  FROM comments cm JOIN users u ON u.id = cm.author_id JOIN posts p ON p.id = cm.post_id
-							 WHERE COALESCE(cm.status, 'approved') = ?
+							 WHERE COALESCE(cm.status, 'approved') = ? AND COALESCE(cm.deleted_at, 0) = 0 AND COALESCE(p.deleted_at, 0) = 0
 						) ORDER BY created_at DESC LIMIT ? OFFSET ?`
 					).bind(status, status, pageSize, offset).all(),
 					db.prepare(
 						`SELECT
-							(SELECT COUNT(*) FROM posts WHERE COALESCE(status, 'approved') = ?) +
-							(SELECT COUNT(*) FROM comments WHERE COALESCE(status, 'approved') = ?) AS total`
+							(SELECT COUNT(*) FROM posts WHERE COALESCE(status, 'approved') = ? AND COALESCE(deleted_at, 0) = 0) +
+							(SELECT COUNT(*) FROM comments WHERE COALESCE(status, 'approved') = ? AND COALESCE(deleted_at, 0) = 0) AS total`
 					).bind(status, status).first<{ total: number }>(),
 					db.prepare("SELECT value FROM settings WHERE key = 'moderation_default_reject_reason'").first<DBSetting>(),
 					db.prepare("SELECT value FROM settings WHERE key = 'moderation_reject_reasons'").first<DBSetting>()

@@ -9,7 +9,10 @@ CREATE TABLE IF NOT EXISTS plugins (
   config TEXT DEFAULT '{}',
   html TEXT DEFAULT '',
   block_types TEXT DEFAULT '[]',
+  resource_types TEXT DEFAULT '[]',
   i18n TEXT DEFAULT '{}',
+  deleted_at INTEGER DEFAULT 0,
+  deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

@@ -1,4 +1,5 @@
 import type { DBSetting } from '../db/types';
+import type { UserPayload } from '../core/security';
 
 export type JsonResponse = (data: any, status?: number, extraHeaders?: HeadersInit) => Response;
 
@@ -10,6 +11,7 @@ export type ApiContext = {
 	db: D1Database;
 	jsonResponse: JsonResponse;
 	handleError: (e: any) => Response;
+	authenticate?: (request: Request) => Promise<UserPayload | null>;
 	requestLocale: () => string;
 	normalizeLocale: (value: unknown) => string;
 	getEnabledLanguages: () => Promise<any[]>;

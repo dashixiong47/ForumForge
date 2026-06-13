@@ -41,6 +41,14 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 		getBaseUrl,
 	} = ctx;
 	const adminUser = () => apiAdminUser || authenticateAdminForPath();
+	const clampRestrictionUntil = (body: any) => {
+		const now = Math.floor(Date.now() / 1000);
+		const until = Math.floor(Number(body?.until || 0) || 0);
+		const duration = Math.floor(Number(body?.duration_seconds || body?.duration || 0) || 0);
+		const next = until > now ? until : duration > 0 ? now + Math.min(duration, 3650 * 86400) : 0;
+		return next > now ? next : 0;
+	};
+	const clearUserCache = (id: string | number) => executionCtx.waitUntil(env.CACHE.delete(`user:${id}`).catch(() => {}));
 
 	if (url.pathname.match(/^\/api\/admin\/users\/\d+\/update$/) && method === 'POST') {
 		const id = url.pathname.split('/')[4];
@@ -127,8 +135,45 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 			}
 
 			await security.logAudit(userPayload.id, 'ADMIN_UPDATE_USER', 'user', id, { username, email, avatar_url, role, verified, passwordChanged: !!password }, request);
-			executionCtx.waitUntil(env.CACHE.delete(`user:${id}`).catch(() => {}));
+			clearUserCache(id);
 			return jsonResponse({ success: true });
+		} catch (e) {
+			return handleError(e);
+		}
+	}
+
+	if (url.pathname.match(/^\/api\/admin\/users\/\d+\/restrict$/) && method === 'POST') {
+		const id = url.pathname.split('/')[4];
+		try {
+			const userPayload = await adminUser();
+			const body = await request.json().catch(() => ({})) as any;
+			const action = String(body.action || '').trim().toLowerCase();
+			const reason = String(body.reason || '').trim().slice(0, 500);
+			const until = clampRestrictionUntil(body);
+			const target = await db.prepare('SELECT id, role FROM users WHERE id = ?').bind(id).first<DBUser>();
+			if (!target) return jsonResponse({ error: 'User not found' }, 404);
+			if (Number(target.id) === Number(userPayload.id) && (action === 'disable' || action === 'mute')) return jsonResponse({ error: 'Cannot restrict yourself' }, 400);
+			if (target.role === 'admin' && userPayload.role !== 'admin') return jsonResponse({ error: 'Only administrators can restrict administrators' }, 403);
+			if (action === 'mute') {
+				if (!until) return jsonResponse({ error: 'Missing mute duration' }, 400);
+				await db.prepare('UPDATE users SET muted_until = ?, muted_reason = ? WHERE id = ?').bind(until, reason, id).run();
+				await security.logAudit(userPayload.id, 'ADMIN_MUTE_USER', 'user', id, { until, reason }, request);
+			} else if (action === 'unmute') {
+				await db.prepare("UPDATE users SET muted_until = 0, muted_reason = '' WHERE id = ?").bind(id).run();
+				await security.logAudit(userPayload.id, 'ADMIN_UNMUTE_USER', 'user', id, {}, request);
+			} else if (action === 'disable') {
+				if (!until) return jsonResponse({ error: 'Missing disable duration' }, 400);
+				await db.prepare('UPDATE users SET disabled_until = ?, disabled_reason = ? WHERE id = ?').bind(until, reason, id).run();
+				await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run();
+				await security.logAudit(userPayload.id, 'ADMIN_DISABLE_USER', 'user', id, { until, reason }, request);
+			} else if (action === 'enable') {
+				await db.prepare("UPDATE users SET disabled_until = 0, disabled_reason = '' WHERE id = ?").bind(id).run();
+				await security.logAudit(userPayload.id, 'ADMIN_ENABLE_USER', 'user', id, {}, request);
+			} else {
+				return jsonResponse({ error: 'Invalid restriction action' }, 400);
+			}
+			clearUserCache(id);
+			return jsonResponse({ success: true, until });
 		} catch (e) {
 			return handleError(e);
 		}
@@ -227,7 +272,7 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 	if (url.pathname === '/api/admin/users' && method === 'GET') {
 		try {
 			await adminUser();
-			const { results } = await db.prepare('SELECT id, email, username, role, permissions, verified, created_at, avatar_url FROM users ORDER BY created_at DESC').all();
+			const { results } = await db.prepare('SELECT id, email, username, role, permissions, verified, created_at, avatar_url, disabled_until, disabled_reason, muted_until, muted_reason FROM users ORDER BY created_at DESC').all();
 			return jsonResponse(results);
 		} catch (e) {
 			return handleError(e);
@@ -341,40 +386,29 @@ export async function handleAdminUsersApi(ctx: AdminUsersApiContext): Promise<Re
 	}
 
 	if (url.pathname.startsWith('/api/admin/users/') && method === 'DELETE') {
-		const id = url.pathname.split('/').pop();
+		const id = String(url.pathname.split('/').pop() || '');
 		try {
 			const userPayload = await adminUser();
-			const user = await db.prepare('SELECT avatar_url FROM users WHERE id = ?').bind(id).first<{avatar_url?: string}>();
-			const posts = await db.prepare('SELECT content FROM posts WHERE author_id = ?').bind(id).all();
-
-			const deletionPromises: Promise<any>[] = [];
-			if (user && user.avatar_url) {
-				deletionPromises.push(deleteImage(env as unknown as S3Env, user.avatar_url, id));
+			const body = await request.json().catch(() => ({})) as any;
+			const confirmText = String(body.confirm || '').trim();
+			const user = await db.prepare('SELECT id, avatar_url, username, role FROM users WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<{ id: number; avatar_url?: string; username?: string; role?: string }>();
+			if (!user) return jsonResponse({ error: 'User not found' }, 404);
+			if (Number(user.id) === Number(userPayload.id)) return jsonResponse({ error: 'Cannot delete yourself' }, 400);
+			if (confirmText !== String(user.username || '')) return jsonResponse({ error: 'Confirmation does not match username' }, 400);
+			if (user.role === 'admin') {
+				const adminCount = await db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").first<DBCount>();
+				if ((adminCount?.count || 0) <= 1) return jsonResponse({ error: 'At least one administrator is required' }, 400);
 			}
-			if (posts.results) {
-				for (const post of posts.results) {
-					const imageUrls = extractImageUrls(post.content as string);
-					imageUrls.forEach(url => deletionPromises.push(deleteImage(env as unknown as S3Env, url, id)));
-				}
-			}
-			if (deletionPromises.length > 0) {
-				executionCtx.waitUntil(Promise.all(deletionPromises).catch(err => console.error('Failed to delete user images', err)));
-			}
-
-			await db.prepare('DELETE FROM likes WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(id).run();
-			await db.prepare('UPDATE user_progress_logs SET post_id = NULL, comment_id = NULL WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?) OR comment_id IN (SELECT id FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?))').bind(id, id).run();
-			await db.prepare('DELETE FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(id).run();
-			await db.prepare('DELETE FROM post_tags WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(id).run();
-			await db.prepare('DELETE FROM likes WHERE user_id = ?').bind(id).run();
-			await db.prepare('DELETE FROM user_progress_logs WHERE user_id = ?').bind(id).run();
-			await db.prepare('UPDATE user_progress_logs SET comment_id = NULL WHERE comment_id IN (SELECT id FROM comments WHERE author_id = ?)').bind(id).run();
-			await db.prepare('DELETE FROM comments WHERE author_id = ?').bind(id).run();
-			await db.prepare('DELETE FROM posts WHERE author_id = ?').bind(id).run();
+			const now = Math.floor(Date.now() / 1000);
+			await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?) AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+			await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE author_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+			await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE author_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+			await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run();
 
 			const userToDelete = await db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first<{ email: string; username: string }>();
-			await db.prepare('DELETE FROM users WHERE id = ?').bind(id).run();
+			await db.prepare('UPDATE users SET deleted_at = ?, deleted_by = ?, disabled_until = ?, disabled_reason = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, now + 3650 * 86400, 'deleted', id).run();
 			await security.logAudit(userPayload.id, 'ADMIN_DELETE_USER', 'user', String(id), {}, request);
-			executionCtx.waitUntil(env.CACHE.delete(`user:${id}`).catch(() => {}));
+			clearUserCache(id);
 
 			if (userToDelete) {
 				const setting = await db.prepare("SELECT value FROM settings WHERE key = 'notify_on_user_delete'").first<DBSetting>();

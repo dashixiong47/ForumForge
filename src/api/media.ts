@@ -55,13 +55,14 @@ export async function handleMediaApi(ctx: MediaApiContext): Promise<Response | n
 						db.prepare(
 							`SELECT m.*, p.title AS post_title
 							   FROM media_assets m
-							   LEFT JOIN posts p ON p.id = m.post_id
+							   LEFT JOIN posts p ON p.id = m.post_id AND COALESCE(p.deleted_at, 0) = 0
 							  WHERE m.scope IN (${includePosts ? "'system', 'post'" : "'system'"})
 							  ORDER BY m.created_at DESC, m.id DESC`
 						).all(),
 						includePosts ? db.prepare(
 							`SELECT id, title, author_id, content, created_at
 							   FROM posts
+							  WHERE COALESCE(deleted_at, 0) = 0
 							  ORDER BY created_at DESC
 							  LIMIT 1000`
 						).all() : Promise.resolve({ results: [] } as any),
@@ -162,7 +163,10 @@ export async function handleMediaApi(ctx: MediaApiContext): Promise<Response | n
 						return jsonResponse({ error: 'Only administrators can upload system media' }, 403);
 					}
 				} else if (uploadType === 'post') {
-					await requireVerifiedUser(user);
+					const accessUser = await requireVerifiedUser(user);
+					if (Number((accessUser as any).muted_until || 0) > Math.floor(Date.now() / 1000)) {
+						return jsonResponse({ error: 'Account muted' }, 403);
+					}
 				}
 
 				const isAvatar = uploadType === 'avatar';

@@ -75,6 +75,8 @@ export const BUILTIN_TRANSLATIONS: Array<{ key: string; zh: string; en: string }
 	{ key: 'comment.placeholder', zh: '写下你的评论...', en: 'Write your comment...' },
 	{ key: 'comment.submit', zh: '发布评论', en: 'Post comment' },
 	{ key: 'comment.pending', zh: '评论已提交，等待审核。', en: 'Comment submitted for review.' },
+	{ key: 'comment.emptyInput', zh: '评论不能为空。', en: 'Comment cannot be empty.' },
+	{ key: 'comment.tooLong', zh: '评论不能超过 3000 个字符。', en: 'Comment cannot exceed 3000 characters.' },
 	{ key: 'comment.loginToReply', zh: '登录后评论', en: 'Sign in to comment' },
 	{ key: 'comment.empty', zh: '暂无评论', en: 'No comments yet' },
 	{ key: 'comment.reply', zh: '回复', en: 'Reply' },

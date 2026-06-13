@@ -13,7 +13,7 @@ function attr(value: unknown): string {
 
 const SAFE_TAGS = new Set([
 	'a', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr',
-	'iframe', 'img', 'li', 'ol', 'p', 'pre', 'span', 'strong', 'table', 'tbody', 'td', 'th', 'thead',
+	'div', 'iframe', 'img', 'li', 'ol', 'p', 'pre', 'span', 'strong', 'table', 'tbody', 'td', 'th', 'thead',
 	'tr', 'ul', 'video', 'source',
 ]);
 
@@ -171,6 +171,10 @@ function sanitizeAttrs(tag: string, attrs: string, options?: MarkdownRenderOptio
 		const name = match[1].toLowerCase();
 		const value = String(match[3] ?? match[4] ?? match[5] ?? '');
 		if (name.startsWith('on')) continue;
+		if (name === 'class' && tag === 'div' && value === 'muted') {
+			out.push(`class="${attr(value)}"`);
+			continue;
+		}
 		if (name === 'style' && tag === 'span') {
 			const style = sanitizeStyle(value);
 			if (style) out.push(`style="${attr(style)}"`);

@@ -4,11 +4,13 @@ import type { UserPayload } from '../core/security';
 import { decodePublicId, publicPostPath } from '../core/id-codec';
 import { DEFAULT_LEVEL_SETTINGS, LEVEL_SETTING_KEYS, normalizeLevelSettings } from '../gamification/progress';
 import { DEFAULT_VIDEO_EMBED_DOMAINS, normalizeVideoEmbedDomains, serializeVideoEmbedDomains } from '../site/markdown';
+import { getPluginResourceByRef, resourcePluginForType } from '../api/plugin-resources';
 import {
 	renderAuthPage,
 	renderHomePage,
 	renderMyContentPage,
 	renderNewPostPage,
+	renderPluginResourcePage,
 	renderPostPage,
 	renderPublicUserPage,
 	renderSettingsPageSite,
@@ -110,6 +112,30 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 			const localizedPostJoin = (enabled: boolean) => enabled ? `LEFT JOIN post_translations pt ON pt.post_id = posts.id AND pt.locale = ?` : '';
 			const localizedPostParams = (enabled: boolean) => enabled ? [currentLocale] : [];
 
+			const resourceViewerMatch = url.pathname.match(/^\/plugin-resources\/([a-z0-9-]+)\/([0-9A-Za-z]{1,96})$/)
+				|| url.pathname.match(/^\/blueprints\/([0-9A-Za-z]{1,96})$/);
+			if (resourceViewerMatch) {
+				const type = resourceViewerMatch.length === 3 ? resourceViewerMatch[1] : 'blueprint';
+				const ref = resourceViewerMatch.length === 3 ? resourceViewerMatch[2] : resourceViewerMatch[1];
+				const typeGate = await resourcePluginForType(db, type);
+				if (!typeGate.pluginId || !typeGate.enabled) {
+					return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>资源不存在</h1>'), 404);
+				}
+				const row = await getPluginResourceByRef(env as Env, db, type, ref);
+				if (!row || row.plugin_id !== typeGate.pluginId) {
+					return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>资源不存在</h1>'), 404);
+				}
+				return siteHtmlResponse(renderPluginResourcePage({
+					user,
+					brand,
+					categories,
+					type,
+					id: row.publicId,
+					title: row.title || type,
+					height: Number((row.parsedMeta || {}).height || 0) || 980,
+				}));
+			}
+
 			if (url.pathname === '/settings') {
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
 				const oauthCount = await db.prepare('SELECT COUNT(*) AS count FROM oauth_accounts WHERE user_id = ?').bind(user.id).first<DBCount>().catch(() => ({ count: 0 }) as DBCount);
@@ -133,16 +159,17 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const [postsRes, postsCount, draftsRes, draftsCount, commentsRes, commentsCount, progressRes, progressCount, notificationsRes, notificationsCount] = await Promise.all([
 					db.prepare(
 						`SELECT ${localizedPostColumns(localizePosts)} categories.name as category_name,
-							(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
+							(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0) as comment_count
 						 FROM posts
 						 LEFT JOIN categories ON posts.category_id = categories.id
 						 ${localizedPostJoin(localizePosts)}
 						 WHERE posts.author_id = ?
 						   AND COALESCE(posts.status, 'approved') <> 'draft'
+						   AND COALESCE(posts.deleted_at, 0) = 0
 						 ORDER BY posts.created_at DESC
 						 LIMIT ? OFFSET ?`
 					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (postsPage - 1) * pageSize).all(),
-					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') <> 'draft'").bind(user.id).first<DBCount>(),
+					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') <> 'draft' AND COALESCE(deleted_at, 0) = 0").bind(user.id).first<DBCount>(),
 					db.prepare(
 						`SELECT ${localizedPostColumns(localizePosts)} categories.name as category_name
 						 FROM posts
@@ -150,20 +177,23 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 						 ${localizedPostJoin(localizePosts)}
 						 WHERE posts.author_id = ?
 						   AND COALESCE(posts.status, 'approved') = 'draft'
+						   AND COALESCE(posts.deleted_at, 0) = 0
 						 ORDER BY posts.created_at DESC
 						 LIMIT ? OFFSET ?`
 					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (draftsPage - 1) * pageSize).all(),
-					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') = 'draft'").bind(user.id).first<DBCount>(),
+					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') = 'draft' AND COALESCE(deleted_at, 0) = 0").bind(user.id).first<DBCount>(),
 					db.prepare(
 						`SELECT comments.*, ${localizePosts ? "COALESCE(NULLIF(pt.title, ''), posts.title)" : 'posts.title'} as post_title
 						 FROM comments
 						 JOIN posts ON posts.id = comments.post_id
 						 ${localizedPostJoin(localizePosts)}
 						 WHERE comments.author_id = ?
+						   AND COALESCE(comments.deleted_at, 0) = 0
+						   AND COALESCE(posts.deleted_at, 0) = 0
 						 ORDER BY comments.created_at DESC
 						 LIMIT ? OFFSET ?`
 					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (repliesPage - 1) * pageSize).all(),
-					db.prepare('SELECT COUNT(*) AS count FROM comments WHERE author_id = ?').bind(user.id).first<DBCount>(),
+					db.prepare('SELECT COUNT(*) AS count FROM comments WHERE author_id = ? AND COALESCE(deleted_at, 0) = 0').bind(user.id).first<DBCount>(),
 					db.prepare(
 						`SELECT user_progress_logs.*, ${localizePosts ? "COALESCE(NULLIF(pt.title, ''), posts.title)" : 'posts.title'} as post_title
 						 FROM user_progress_logs
@@ -243,7 +273,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const profile = await db.prepare(
 					`SELECT id, email, username, role, verified, avatar_url, email_notifications, show_public_posts, points, experience, level, last_checkin_date, created_at
 					 FROM users
-					 WHERE id = ?`
+					 WHERE id = ? AND COALESCE(deleted_at, 0) = 0`
 				).bind(profileId).first<SiteUser>();
 				if (!profile) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>用户不存在</h1>'), 404);
 				const pageSize = 12;
@@ -259,10 +289,11 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 							   LEFT JOIN categories ON posts.category_id = categories.id
 							  WHERE posts.author_id = ?
 							    AND COALESCE(posts.status, 'approved') = 'approved'
+							    AND COALESCE(posts.deleted_at, 0) = 0
 							    AND (posts.category_id IS NULL OR (COALESCE(categories.enabled, 1) = 1 AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)))`
 						).bind(profile.id, includeAdminOnlyProfilePosts ? 1 : 0).first<DBCount>()
 						: Promise.resolve({ count: 0 } as DBCount),
-					db.prepare("SELECT COUNT(*) AS count FROM comments WHERE author_id = ? AND COALESCE(status, 'approved') = 'approved'").bind(profile.id).first<DBCount>(),
+					db.prepare("SELECT COUNT(*) AS count FROM comments WHERE author_id = ? AND COALESCE(status, 'approved') = 'approved' AND COALESCE(deleted_at, 0) = 0").bind(profile.id).first<DBCount>(),
 					showPosts
 						? db.prepare(
 							`SELECT ${localizedPostColumns(localizeProfilePosts)}
@@ -274,13 +305,14 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 								users.level as author_level,
 								categories.name as category_name,
 								(SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) as like_count,
-								(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
+								(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0) as comment_count
 							 FROM posts
 							 JOIN users ON posts.author_id = users.id
 							 LEFT JOIN categories ON posts.category_id = categories.id
 							 ${localizedPostJoin(localizeProfilePosts)}
 							 WHERE posts.author_id = ?
 							   AND COALESCE(posts.status, 'approved') = 'approved'
+							   AND COALESCE(posts.deleted_at, 0) = 0
 							   AND (posts.category_id IS NULL OR (COALESCE(categories.enabled, 1) = 1 AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)))
 							 ORDER BY posts.created_at DESC
 							 LIMIT ? OFFSET ?`
@@ -312,7 +344,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					`SELECT posts.*, categories.name as category_name
 					 FROM posts
 					 LEFT JOIN categories ON posts.category_id = categories.id
-					 WHERE posts.id = ?`
+					 WHERE posts.id = ? AND COALESCE(posts.deleted_at, 0) = 0`
 				).bind(postId).first<SitePost>();
 				if (!post) return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>帖子不存在</h1>'), 404);
 				if (!canAdmin(user as any, 'posts') && Number(post.author_id) !== Number(user.id)) {
@@ -362,7 +394,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 						categories.name as category_name,
 						categories.admin_only as admin_only,
 						(SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) as like_count,
-						(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
+						(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0) as comment_count
 					 FROM posts
 					 JOIN users ON posts.author_id = users.id
 					 LEFT JOIN categories ON posts.category_id = categories.id
@@ -392,7 +424,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					`SELECT comments.*, users.username, users.avatar_url, users.role, users.points, users.experience, users.level
 					 FROM comments
 					 JOIN users ON comments.author_id = users.id
-						 WHERE post_id = ? AND COALESCE(comments.status, 'approved') = 'approved'
+						 WHERE post_id = ? AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0
 					 ORDER BY created_at ASC`
 				).bind(postId).all();
 				return siteHtmlResponse(renderPostPage({
@@ -417,6 +449,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				const includeAdminOnly = user ? canAdmin(user as any, 'posts') || canAdmin(user as any, 'categories') : false;
 				const conditions: string[] = [
 					"COALESCE(posts.status, 'approved') = 'approved'",
+					"COALESCE(posts.deleted_at, 0) = 0",
 					"(posts.category_id IS NULL OR (COALESCE(categories.enabled, 1) = 1 AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)))"
 				];
 				const params: any[] = [includeAdminOnly ? 1 : 0];
@@ -453,7 +486,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 							users.level as author_level,
 							categories.name as category_name,
 							(SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) as like_count,
-							(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved') as comment_count
+							(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0) as comment_count
 						 FROM posts
 						 JOIN users ON posts.author_id = users.id
 						 LEFT JOIN categories ON posts.category_id = categories.id
@@ -485,5 +518,3 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 
 			return siteHtmlResponse(renderAuthPage('login', '', [], brand).replace('<h1>登录</h1>', '<h1>页面不存在</h1>'), 404);
 }
-
-

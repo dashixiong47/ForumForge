@@ -11,6 +11,10 @@ export interface UserPayload {
     points?: number;
     experience?: number;
     level?: number;
+    disabled_until?: number;
+    disabled_reason?: string;
+    muted_until?: number;
+    muted_reason?: string;
 }
 
 export class Security {
