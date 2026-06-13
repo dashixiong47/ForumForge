@@ -362,7 +362,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 					install_count: installMap.get(row.id) || 0,
 				};
 				});
-				return adminHtmlResponse(renderAdminPlugins(userPayload, plugins));
+				return adminHtmlResponse(renderAdminPlugins(userPayload, plugins, requestLocale()));
 			}
 
 			const pluginEditorMatch = url.pathname.match(/^\/admin\/plugins\/([^/]+)\/editor$/);

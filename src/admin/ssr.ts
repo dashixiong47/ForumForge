@@ -488,7 +488,8 @@ initDashboard();
 	});
 }
 
-export function renderAdminPlugins(user: UserPayload, plugins: any[]): string {
+export function renderAdminPlugins(user: UserPayload, plugins: any[], locale = 'zh-CN'): string {
+	const fallbackLocale = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
 	const cards = plugins.map((plugin) => {
 		const id = escapeHtml(plugin.id);
 		const type = escapeHtml(plugin.type || 'system');
@@ -496,16 +497,19 @@ export function renderAdminPlugins(user: UserPayload, plugins: any[]): string {
 		const tags = (parseJson(plugin.tags, []) as any[]).map((tag) => String(tag)).filter(Boolean);
 		const blockTypes = (parseJson(plugin.block_types, []) as any[]).map((tag) => String(tag)).filter(Boolean);
 		const tagChips = [...blockTypes.map((tag) => `<span class="chip chip-block">${escapeHtml(tag)}</span>`), ...tags.map((tag) => `<span class="chip chip-tag">#${escapeHtml(tag)}</span>`)].join('');
+		const pluginI18n = parseJson(plugin.i18n, {}) as Record<string, Record<string, string>>;
+		const displayName = pluginI18n['plugin.name']?.[locale] || pluginI18n['plugin.name']?.[fallbackLocale] || String(plugin.name || '');
+		const displayDesc = pluginI18n['plugin.description']?.[locale] || pluginI18n['plugin.description']?.[fallbackLocale] || String(plugin.description || '');
 		return `<article class="ext-card${enabled ? '' : ' disabled'}" data-plugin-id="${id}" data-tags="${escapeHtml(JSON.stringify(tags))}">
 			<div class="ext-head">
 				<div class="ext-icon">${escapeHtml(plugin.icon || 'Puzzle').slice(0, 2)}</div>
 				<div class="ext-main">
-					<div class="ext-title">${escapeHtml(plugin.name)} <span class="ext-badge">${type}</span></div>
+					<div class="ext-title">${escapeHtml(displayName)} <span class="ext-badge">${type}</span></div>
 					<div class="ext-meta">v${escapeHtml(plugin.version || '1.0.0')} · <code>${id}</code>${plugin.author ? ` · ${escapeHtml(plugin.author)}` : ''}</div>
 				</div>
 				${adminButton('admin.plugins.share', '⤴', { class: 'btn-sm icon-btn', 'data-action': 'share', 'data-id': id, 'data-i18n-title': 'admin.plugins.share', title: '分享' })}
 			</div>
-			<p class="ext-desc">${plugin.description ? escapeHtml(plugin.description) : tr('admin.common.none', '暂无数据')}</p>
+			<p class="ext-desc">${displayDesc ? escapeHtml(displayDesc) : tr('admin.common.none', '暂无数据')}</p>
 			${tagChips ? `<div class="chips">${tagChips}</div>` : ''}
 			<div id="plugin-update-${id}" class="plugin-update"></div>
 			<div class="ext-actions">
