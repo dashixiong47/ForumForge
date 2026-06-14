@@ -31,6 +31,11 @@ wrangler.*.local.jsonc
 # TypeScript
 *.tsbuildinfo
 
+# Private/non-open-source plugin manifests
+*.plugin.json
+private-plugins/
+import-*.ps1
+
 # Editor and OS files
 .DS_Store
 Thumbs.db

@@ -14,6 +14,8 @@ import {
 	renderAdminTags,
 	renderAdminUsers,
 	renderPluginEditor,
+	renderAdminPluginShell,
+	renderAdminBadgesPage,
 	renderSettingsPage,
 	renderSimpleAdminTable,
 } from '../admin/ssr';
@@ -22,6 +24,7 @@ import type { DBCount, DBPlugin, DBSetting } from '../db/types';
 import { escapeHtml } from '../utils/html';
 import { extractMediaUrls, mediaTypeFromValue } from '../utils/media';
 import { hydrateBuiltinPluginRow, normalizePluginId } from '../plugins/registry';
+import { loadAdminMedia } from '../admin/media-loader';
 import { PROGRESS_REWARD_KEYS } from '../gamification/progress';
 import { getKeyFromUrl, getPublicUrl, listAllKeys, type S3Env } from '../integrations/s3';
 import type { UserPayload } from '../core/security';
@@ -65,138 +68,6 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 			const userPayload = await getAdminUser();
 			if (!userPayload) return renderAdminLoginRedirect();
 
-			const r2KeyUrl = (key: string) => getPublicUrl(
-				env as unknown as S3Env,
-				key,
-				(env as any).BUCKET ? `${getBaseUrl()}/r2` : undefined
-			);
-
-			const loadAdminMedia = async (includePosts: boolean, page: number, pageSize: number, query = '', type = '') => {
-				type MediaRow = {
-					id?: number | null;
-					scope: string;
-					owner_id?: number | null;
-					post_id?: number | null;
-					post_title?: string;
-					key: string;
-					url: string;
-					filename: string;
-					mime_type: string;
-					size_bytes: number;
-					media_type: string;
-					source: string;
-					created_at: string;
-				};
-				const [assetRows, legacyPosts, allKeys] = await Promise.all([
-					db.prepare(
-						`SELECT m.*, p.title AS post_title
-						   FROM media_assets m
-						   LEFT JOIN posts p ON p.id = m.post_id
-						  WHERE m.scope IN (${includePosts ? "'system', 'post'" : "'system'"})
-						  ORDER BY m.created_at DESC, m.id DESC`
-					).all(),
-					includePosts ? db.prepare(
-						`SELECT p.id, p.title, p.author_id, p.content, p.created_at
-						   FROM posts p
-						  ORDER BY p.created_at DESC
-						  LIMIT 1000`
-					).all() : Promise.resolve({ results: [] } as any),
-					listAllKeys(env as unknown as S3Env).catch(() => [])
-				]);
-				const items: MediaRow[] = ((assetRows.results || []) as any[]).map((row) => ({
-					...row,
-					id: row.id ?? null,
-					scope: String(row.scope || 'post'),
-					filename: String(row.filename || row.key || ''),
-					size_bytes: Number(row.size_bytes || 0),
-					media_type: String(row.media_type || mediaTypeFromValue(row.mime_type || '', row.url || row.key)),
-					source: String(row.source || 'upload'),
-					created_at: String(row.created_at || ''),
-				}));
-				const known = new Set(items.map((item) => item.key || getKeyFromUrl(env as unknown as S3Env, item.url) || item.url));
-				for (const key of (allKeys || [])) {
-					const isSystemKey = /(^|\/)system\/media\//.test(key);
-					const isPostKey = /(^|\/)usr\/[^/]+\/post\//.test(key);
-					if ((!includePosts && !isSystemKey) || (includePosts && !isSystemKey && !isPostKey)) continue;
-					if (known.has(key)) continue;
-					known.add(key);
-					const filename = (() => {
-						try { return decodeURIComponent(key.split('/').pop() || 'media'); } catch { return key.split('/').pop() || 'media'; }
-					})();
-					items.push({
-						id: null,
-						scope: isSystemKey ? 'system' : 'post',
-						owner_id: null,
-						post_id: null,
-						post_title: '',
-						key,
-						url: r2KeyUrl(key),
-						filename,
-						mime_type: '',
-						size_bytes: 0,
-						media_type: mediaTypeFromValue('', key),
-						source: 'bucket-scan',
-						created_at: '',
-					});
-				}
-				for (const post of (legacyPosts.results || []) as any[]) {
-					for (const mediaUrl of extractMediaUrls(String(post.content || ''))) {
-						const key = getKeyFromUrl(env as unknown as S3Env, mediaUrl) || mediaUrl;
-						if (!key || known.has(key)) continue;
-						known.add(key);
-						const decodedName = (() => {
-							try {
-								const last = key.split('/').pop() || 'media';
-								return decodeURIComponent(last);
-							} catch {
-								return key.split('/').pop() || 'media';
-							}
-						})();
-						items.push({
-							id: null,
-							scope: 'post',
-							owner_id: Number(post.author_id || 0),
-							post_id: Number(post.id || 0),
-							post_title: String(post.title || ''),
-							key,
-							url: mediaUrl,
-							filename: decodedName,
-							mime_type: '',
-							size_bytes: 0,
-							media_type: mediaTypeFromValue('', mediaUrl),
-							source: 'post-scan',
-							created_at: String(post.created_at || ''),
-						});
-					}
-				}
-				const needle = query.trim().toLowerCase();
-				const mediaType = type.trim().toLowerCase();
-				const filtered = items.filter((item) => {
-					const matchesQuery = !needle || [
-						item.filename,
-						item.key,
-						item.url,
-						item.post_title,
-						item.mime_type,
-						item.media_type,
-						item.source,
-						item.scope,
-					].some((value) => String(value || '').toLowerCase().includes(needle));
-					const matchesType = !mediaType || String(item.media_type || '').toLowerCase() === mediaType;
-					return matchesQuery && matchesType;
-				});
-				filtered.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-				const offset = (page - 1) * pageSize;
-				return {
-					includePosts,
-					query,
-					type,
-					page,
-					pageSize,
-					total: filtered.length,
-					items: filtered.slice(offset, offset + pageSize)
-				};
-			};
 
 			if (url.pathname === '/admin') {
 				const [users, posts, comments, plugins, topPosts, catStats, newUsers, visits7, countries7, visits30, device30, topPaths30, latestVisits] = await Promise.all([
@@ -350,6 +221,13 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				}));
 			}
 
+			if (url.pathname === '/admin/badges') {
+				const pluginsRes = await db
+					.prepare('SELECT id, slug, name, js, config, i18n FROM plugins WHERE enabled=1 AND COALESCE(deleted_at,0)=0')
+					.all();
+				return adminHtmlResponse(renderAdminBadgesPage(userPayload, [], (pluginsRes.results || []) as any[]));
+			}
+
 			if (url.pathname === '/admin/plugins') {
 				const [pluginsRes, installsRes] = await Promise.all([
 					db.prepare('SELECT * FROM plugins WHERE COALESCE(deleted_at, 0) = 0 ORDER BY name ASC').all(),
@@ -384,6 +262,15 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 					), 404);
 				}
 				return adminHtmlResponse(renderPluginEditor(userPayload, plugin, requestLocale()));
+			}
+
+			const pluginPageMatch = url.pathname.match(/^\/admin\/plugins\/([^/]+)$/);
+			if (pluginPageMatch) {
+				const pluginId = pluginPageMatch[1];
+				const pluginRow = await db.prepare('SELECT name, js, css FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(pluginId).first<{ name?: string; js?: string; css?: string }>().catch(() => null);
+				if (pluginRow) {
+					return adminHtmlResponse(renderAdminPluginShell(userPayload, pluginId, pluginRow.name || pluginId, pluginRow.js || '', pluginRow.css || ''));
+				}
 			}
 
 			if (url.pathname === '/admin/i18n') {
@@ -459,7 +346,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				const pageSize = Math.min(60, Math.max(12, Number(url.searchParams.get('pageSize') || 24)));
 				const query = url.searchParams.get('q') || '';
 				const type = url.searchParams.get('type') || '';
-				const data = await loadAdminMedia(includePosts, page, pageSize, query, type);
+				const data = await loadAdminMedia(env, db, getBaseUrl, includePosts, page, pageSize, query, type);
 				return adminHtmlResponse(renderAdminMedia(userPayload, data, env));
 			}
 
@@ -738,4 +625,3 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				{ titleKey: 'admin.notFound.title', subtitleKey: 'admin.notFound.subtitle', emptyKey: 'admin.notFound.title' }
 			), 404);
 }
-

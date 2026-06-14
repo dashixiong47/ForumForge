@@ -1,5 +1,5 @@
 import type { DBPlugin } from '../db/types';
-import { comparePluginVersion, hydrateBuiltinPluginRow, normalizePluginId, normalizePluginManifest, validatePluginConfig } from '../plugins/registry';
+import { comparePluginVersion, hydrateBuiltinPluginRow, normalizePluginConfigSchema, normalizePluginId, normalizePluginManifest, validatePluginConfig } from '../plugins/registry';
 import { parseJsonValue, safeJsonString } from '../utils/json';
 import type { UserPayload } from '../core/security';
 import type { JsonResponse } from './types';
@@ -17,6 +17,105 @@ export type PluginApiContext = {
 	upsertPluginManifest: (manifest: any, sourceUrl?: string) => Promise<void>;
 	getBaseUrl: () => string;
 };
+
+function sanitizeBadgeKeyPart(value: unknown): string {
+	return String(value || '')
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 80);
+}
+
+function fieldValue(item: any, key: string): string {
+	if (!key || !item || typeof item !== 'object') return '';
+	return String(item[key] ?? '').trim();
+}
+
+function badgeKeyForItem(map: NonNullable<ReturnType<typeof normalizePluginConfigSchema>['fields'][number]['badgeDefinitions']>, item: any): string {
+	const rawKey = fieldValue(item, map.keyField || 'key');
+	const keyPart = sanitizeBadgeKeyPart(rawKey);
+	return keyPart ? `${map.keyPrefix || ''}${keyPart}`.slice(0, 128) : '';
+}
+
+async function migratePluginBadgeDefinitionKeys(db: D1Database, pluginId: string, configSchema: unknown, oldConfig: unknown, newConfig: unknown) {
+	const schema = normalizePluginConfigSchema(configSchema);
+	const oldCfg = oldConfig && typeof oldConfig === 'object' && !Array.isArray(oldConfig) ? oldConfig as Record<string, any> : {};
+	const newCfg = newConfig && typeof newConfig === 'object' && !Array.isArray(newConfig) ? newConfig as Record<string, any> : {};
+	for (const field of schema.fields) {
+		const map = field.badgeDefinitions;
+		if (!map) continue;
+		const oldList = Array.isArray(oldCfg[field.key]) ? oldCfg[field.key] : [];
+		const newList = Array.isArray(newCfg[field.key]) ? newCfg[field.key] : [];
+		const oldByLabel = new Map<string, string>();
+		for (const item of oldList) {
+			const label = fieldValue(item, map.labelField || 'name').toLowerCase();
+			const badgeKey = badgeKeyForItem(map, item);
+			if (label && badgeKey) oldByLabel.set(label, badgeKey);
+		}
+		for (const item of newList) {
+			const label = fieldValue(item, map.labelField || 'name').toLowerCase();
+			const nextKey = badgeKeyForItem(map, item);
+			const prevKey = label ? oldByLabel.get(label) : '';
+			if (!prevKey || !nextKey || prevKey === nextKey) continue;
+			await db.batch([
+				db.prepare(`UPDATE user_badges
+				              SET badge_key = ?
+				            WHERE plugin_id = ? AND badge_key = ?
+				              AND NOT EXISTS (
+				                SELECT 1 FROM user_badges newer
+				                 WHERE newer.user_id = user_badges.user_id
+				                   AND newer.plugin_id = user_badges.plugin_id
+				                   AND newer.badge_key = ?
+				              )`).bind(nextKey, pluginId, prevKey, nextKey),
+				db.prepare('DELETE FROM user_badges WHERE plugin_id = ? AND badge_key = ?').bind(pluginId, prevKey),
+				db.prepare(`UPDATE badge_definitions
+				              SET badge_key = ?
+				            WHERE plugin_id = ? AND badge_key = ?
+				              AND NOT EXISTS (
+				                SELECT 1 FROM badge_definitions newer
+				                 WHERE newer.plugin_id = badge_definitions.plugin_id
+				                   AND newer.badge_key = ?
+				              )`).bind(nextKey, pluginId, prevKey, nextKey),
+				db.prepare('DELETE FROM badge_definitions WHERE plugin_id = ? AND badge_key = ?').bind(pluginId, prevKey),
+			]);
+		}
+	}
+}
+
+async function syncPluginBadgeDefinitions(db: D1Database, pluginId: string, configSchema: unknown, config: unknown) {
+	try { await db.prepare("ALTER TABLE badge_definitions ADD COLUMN description TEXT DEFAULT ''").run(); } catch {}
+	try { await db.prepare('ALTER TABLE badge_definitions ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1').run(); } catch {}
+	const schema = normalizePluginConfigSchema(configSchema);
+	const cfg = config && typeof config === 'object' && !Array.isArray(config) ? config as Record<string, any> : {};
+	const stmts: D1PreparedStatement[] = [];
+	for (const field of schema.fields) {
+		const map = field.badgeDefinitions;
+		if (!map) continue;
+		const list = Array.isArray(cfg[field.key]) ? cfg[field.key] : [];
+		for (const item of list) {
+			if (!item || typeof item !== 'object') continue;
+			const rawKey = fieldValue(item, map.keyField || 'key');
+			const badgeKey = badgeKeyForItem(map, item);
+			if (!badgeKey) continue;
+			const baseLabel = fieldValue(item, map.labelField || 'name') || rawKey;
+			const label = `${baseLabel}${map.labelSuffix || ''}`.slice(0, 100);
+			const description = (fieldValue(item, map.descriptionField || '') || map.defaultDescription || '').slice(0, 500);
+			const icon = (fieldValue(item, map.iconField || '') || map.defaultIcon || '').slice(0, 500);
+			const color = (fieldValue(item, map.colorField || '') || map.defaultColor || '').slice(0, 32);
+			stmts.push(db.prepare(
+				`INSERT INTO badge_definitions (plugin_id, badge_key, label, description, icon, color, enabled)
+				 VALUES (?, ?, ?, ?, ?, ?, 1)
+				 ON CONFLICT(plugin_id, badge_key) DO UPDATE SET
+				   label = CASE WHEN badge_definitions.label = '' OR badge_definitions.label = badge_definitions.badge_key THEN excluded.label ELSE badge_definitions.label END,
+				   description = CASE WHEN badge_definitions.description = '' THEN excluded.description ELSE badge_definitions.description END,
+				   icon = CASE WHEN badge_definitions.icon = '' THEN excluded.icon ELSE badge_definitions.icon END,
+				   color = CASE WHEN badge_definitions.color = '' THEN excluded.color ELSE badge_definitions.color END`
+			).bind(pluginId, badgeKey, label, description, icon, color));
+		}
+	}
+	if (stmts.length) await db.batch(stmts);
+}
 
 export async function handlePluginApi(ctx: PluginApiContext): Promise<Response | null> {
 	const {
@@ -122,6 +221,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const result = normalizePluginManifest(body);
 				if (!result.ok) return jsonResponse({ error: result.error }, 400);
 				await upsertPluginManifest(result.manifest, result.manifest.source_url);
+				await syncPluginBadgeDefinitions(db, result.manifest.id, result.manifest.config_schema, parseJsonValue(result.manifest.config, {}));
 				return jsonResponse({ success: true, plugin: result.manifest }, 201);
 			} catch (e) {
 				return handleError(e);
@@ -212,6 +312,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				});
 				if (!result.ok) return jsonResponse({ error: result.error }, 400);
 				await upsertPluginManifest(result.manifest, existing.source_url);
+				await syncPluginBadgeDefinitions(db, result.manifest.id, result.manifest.config_schema, parseJsonValue(result.manifest.config, {}));
 				return jsonResponse({ success: true, plugin: result.manifest });
 			} catch (e) {
 				return handleError(e);
@@ -235,6 +336,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				});
 				if (!result.ok) return jsonResponse({ error: result.error }, 400);
 				await upsertPluginManifest(result.manifest, result.manifest.source_url);
+				await syncPluginBadgeDefinitions(db, result.manifest.id, result.manifest.config_schema, parseJsonValue(result.manifest.config, {}));
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -253,6 +355,7 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 					if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
 					const checked = validatePluginConfig(row.config_schema || '{}', parseJsonValue(row.config, {}), { requireRequired: true });
 					if (!checked.ok) return jsonResponse({ error: checked.error, field: checked.field, code: 'PLUGIN_CONFIG_REQUIRED' }, 400);
+					await syncPluginBadgeDefinitions(db, id, row.config_schema || '{}', checked.config);
 				}
 				const result = await db.prepare(
 					'UPDATE plugins SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
@@ -269,12 +372,14 @@ export async function handlePluginApi(ctx: PluginApiContext): Promise<Response |
 				const userPayload = apiAdminUser || await authenticateAdminForPath();
 				const id = normalizePluginId(decodeURIComponent(url.pathname.split('/')[4] || ''));
 				if (!id) return jsonResponse({ error: 'Invalid plugin id' }, 400);
-				const row = await db.prepare('SELECT id, config_schema FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
+				const row = await db.prepare('SELECT id, config_schema, config FROM plugins WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(id).first<DBPlugin>();
 				if (!row) return jsonResponse({ error: 'Plugin not found' }, 404);
 				const body = await request.json().catch(() => ({})) as any;
 				const checked = validatePluginConfig(row.config_schema || '{}', body.config || body || {}, { requireRequired: true });
 				if (!checked.ok) return jsonResponse({ error: checked.error, field: checked.field, code: 'PLUGIN_CONFIG_REQUIRED' }, 400);
+				await migratePluginBadgeDefinitionKeys(db, id, row.config_schema || '{}', parseJsonValue(row.config, {}), checked.config);
 				await db.prepare('UPDATE plugins SET config = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(safeJsonString(checked.config, {}), id).run();
+				await syncPluginBadgeDefinitions(db, id, row.config_schema || '{}', checked.config);
 				return jsonResponse({ success: true, config: checked.config });
 			} catch (e) {
 				return handleError(e);

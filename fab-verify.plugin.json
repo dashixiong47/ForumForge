@@ -1,0 +1,392 @@
+{
+  "id": "fab-verify",
+  "name": "FAB Purchase Verification",
+  "description": "FAB Marketplace purchase verification with configurable reusable product badges.",
+  "version": "1.5.0",
+  "type": "integration",
+  "enabled": 0,
+  "config": {
+    "fab_sessionid": "",
+    "products": [
+      {
+        "key": "verified",
+        "name": "FAB",
+        "icon": "/assets/category-icons/general.svg",
+        "color": "#3fb950"
+      },
+      {
+        "key": "fab-multi-order-demo",
+        "name": "FAB Multi-order Test Plugin",
+        "icon": "/assets/category-icons/general.svg",
+        "color": "#3fb950"
+      }
+    ],
+    "manual_approve": false,
+    "purchase_url": "https://accounts.epicgames.com/account/transactions/purchases"
+  },
+  "configSchema": {
+    "fields": [
+      {
+        "key": "fab_sessionid",
+        "type": "password",
+        "label": "FAB Session Cookie",
+        "labelKey": "config.fabSession.label",
+        "description": "Seller fab_sessionid Cookie used to verify buyer orders. Find it in FAB browser cookies and update it periodically.",
+        "descriptionKey": "config.fabSession.description",
+        "placeholder": "Paste fab_sessionid value",
+        "placeholderKey": "config.fabSession.placeholder",
+        "required": true,
+        "defaultValue": ""
+      },
+      {
+        "key": "purchase_url",
+        "type": "url",
+        "label": "Purchase history URL",
+        "labelKey": "config.purchaseUrl.label",
+        "description": "Users can open this page to find their FAB order ID.",
+        "descriptionKey": "config.purchaseUrl.description",
+        "placeholder": "https://accounts.epicgames.com/account/transactions/purchases",
+        "placeholderKey": "config.purchaseUrl.placeholder",
+        "required": false,
+        "defaultValue": "https://accounts.epicgames.com/account/transactions/purchases"
+      },
+      {
+        "key": "products",
+        "type": "json",
+        "label": "Verifiable products",
+        "description": "JSON array. Each item needs key and name; key generates reusable badge_key and name is used for the default badge label.",
+        "required": true,
+        "defaultValue": [
+          {
+            "key": "verified",
+            "name": "FAB",
+            "icon": "/assets/category-icons/general.svg",
+            "color": "#3fb950"
+          },
+          {
+            "key": "fab-multi-order-demo",
+            "name": "FAB Multi-order Test Plugin",
+            "icon": "/assets/category-icons/general.svg",
+            "color": "#3fb950"
+          }
+        ],
+        "badgeDefinitions": {
+          "keyPrefix": "fab-",
+          "keyField": "key",
+          "labelField": "name",
+          "descriptionField": "description",
+          "iconField": "icon",
+          "colorField": "color",
+          "defaultIcon": "/assets/category-icons/general.svg",
+          "defaultColor": "#3fb950",
+          "defaultDescription": "FAB Marketplace purchase verification",
+          "labelSuffix": " Verified Buyer"
+        },
+        "arrayItemFields": [
+          {
+            "key": "key",
+            "label": "Key",
+            "labelKey": "config.product.key.label",
+            "placeholder": "fab-plugin-key"
+          },
+          {
+            "key": "name",
+            "label": "Name",
+            "labelKey": "config.product.name.label",
+            "placeholder": "Product display name",
+            "placeholderKey": "config.product.name.placeholder"
+          },
+          {
+            "key": "icon",
+            "label": "Image",
+            "labelKey": "config.product.icon.label",
+            "type": "media",
+            "placeholder": "/assets/..."
+          },
+          {
+            "key": "color",
+            "label": "Color",
+            "labelKey": "config.product.color.label",
+            "placeholder": "#3fb950"
+          },
+          {
+            "key": "description",
+            "label": "Tooltip",
+            "labelKey": "config.product.description.label",
+            "placeholder": "Mouse hover tooltip",
+            "placeholderKey": "config.product.description.placeholder"
+          }
+        ],
+        "labelKey": "config.products.label",
+        "descriptionKey": "config.products.description"
+      },
+      {
+        "key": "manual_approve",
+        "type": "boolean",
+        "label": "Require manual admin approval",
+        "labelKey": "config.manualApprove.label",
+        "description": "When enabled, successful FAB API checks remain pending until an admin approves them.",
+        "descriptionKey": "config.manualApprove.description",
+        "required": false,
+        "defaultValue": false
+      }
+    ]
+  },
+  "i18n": {
+    "plugin.name": {
+      "zh-CN": "FAB 购买认证",
+      "en-US": "FAB Purchase Verification"
+    },
+    "plugin.description": {
+      "zh-CN": "通过 FAB 订单号验证买家购买身份，认证后在论坛显示专属徽章。",
+      "en-US": "Verify buyer identity via FAB order ID and display a verified badge on the forum."
+    },
+    "config.fabSession.label": {
+      "zh-CN": "FAB Session Cookie",
+      "en-US": "FAB Session Cookie"
+    },
+    "config.fabSession.description": {
+      "zh-CN": "卖家账号的 fab_sessionid Cookie 值，用于代表卖家验证买家订单。可在 FAB 网站浏览器 Cookie 中找到，定期需要更新。",
+      "en-US": "Seller fab_sessionid Cookie used to verify buyer orders. Find it in FAB browser cookies and update it periodically."
+    },
+    "config.fabSession.placeholder": {
+      "zh-CN": "粘贴 fab_sessionid 值",
+      "en-US": "Paste fab_sessionid value"
+    },
+    "config.products.label": {
+      "zh-CN": "可认证产品",
+      "en-US": "Verifiable products"
+    },
+    "config.products.description": {
+      "zh-CN": "JSON 数组。每项至少包含 key 和 name；key 用于生成可复用 badge_key，name 用于默认勋章名。",
+      "en-US": "JSON array. Each item needs key and name; key generates reusable badge_key and name is used for the default badge label."
+    },
+    "config.product.key.label": {
+      "zh-CN": "Key",
+      "en-US": "Key"
+    },
+    "config.product.name.label": {
+      "zh-CN": "名称",
+      "en-US": "Name"
+    },
+    "config.product.name.placeholder": {
+      "zh-CN": "产品显示名",
+      "en-US": "Product display name"
+    },
+    "config.product.icon.label": {
+      "zh-CN": "图片",
+      "en-US": "Image"
+    },
+    "config.product.color.label": {
+      "zh-CN": "颜色",
+      "en-US": "Color"
+    },
+    "config.product.description.label": {
+      "zh-CN": "提示",
+      "en-US": "Tooltip"
+    },
+    "config.product.description.placeholder": {
+      "zh-CN": "鼠标悬浮提示",
+      "en-US": "Mouse hover tooltip"
+    },
+    "config.manualApprove.label": {
+      "zh-CN": "需要管理员手动审核",
+      "en-US": "Require manual admin approval"
+    },
+    "config.manualApprove.description": {
+      "zh-CN": "开启后，即使 FAB API 验证通过也保持待审核状态，需管理员在后台手动确认。",
+      "en-US": "When enabled, successful FAB API checks remain pending until an admin approves them."
+    },
+    "badge.defaultDescription": {
+      "zh-CN": "FAB Marketplace 购买认证",
+      "en-US": "FAB Marketplace purchase verification"
+    },
+    "badge.verifiedBuyer": {
+      "zh-CN": "认证买家",
+      "en-US": "Verified Buyer"
+    },
+    "status.approved": {
+      "zh-CN": "已认证",
+      "en-US": "Verified"
+    },
+    "status.rejected": {
+      "zh-CN": "已拒绝",
+      "en-US": "Rejected"
+    },
+    "status.pending": {
+      "zh-CN": "待审核",
+      "en-US": "Pending"
+    },
+    "settings.title": {
+      "zh-CN": "FAB 购买认证",
+      "en-US": "FAB Purchase Verification"
+    },
+    "settings.description": {
+      "zh-CN": "订单用于审核，产品从插件配置中选择，审核通过后发放对应勋章。",
+      "en-US": "Orders are reviewed against products configured by the plugin. Approved orders grant matching badges."
+    },
+    "settings.submit": {
+      "zh-CN": "提交申请",
+      "en-US": "Submit"
+    },
+    "settings.loading": {
+      "zh-CN": "加载中…",
+      "en-US": "Loading..."
+    },
+    "settings.orderPlaceholder": {
+      "zh-CN": "FAB 订单 ID",
+      "en-US": "FAB order ID"
+    },
+    "settings.selectProduct": {
+      "zh-CN": "选择认证产品",
+      "en-US": "Select product"
+    },
+    "settings.noProducts": {
+      "zh-CN": "暂无可申请产品",
+      "en-US": "No products available"
+    },
+    "settings.noOrders": {
+      "zh-CN": "暂无认证订单",
+      "en-US": "No verification orders"
+    },
+    "settings.loginRequired": {
+      "zh-CN": "请先登录",
+      "en-US": "Please sign in first"
+    },
+    "settings.loadFailed": {
+      "zh-CN": "加载失败",
+      "en-US": "Failed to load"
+    },
+    "settings.orderRequired": {
+      "zh-CN": "请输入订单 ID",
+      "en-US": "Enter an order ID"
+    },
+    "settings.productRequired": {
+      "zh-CN": "请选择认证产品",
+      "en-US": "Select a verification product"
+    },
+    "settings.duplicateProduct": {
+      "zh-CN": "这个产品已经申请过或已认证",
+      "en-US": "This product is already requested or verified"
+    },
+    "settings.verifying": {
+      "zh-CN": "验证中…",
+      "en-US": "Verifying..."
+    },
+    "settings.responseFormatError": {
+      "zh-CN": "FAB API 响应格式错误",
+      "en-US": "FAB API response format error"
+    },
+    "settings.requestFailed": {
+      "zh-CN": "FAB API 请求失败（HTTP {status}）",
+      "en-US": "FAB API request failed (HTTP {status})"
+    },
+    "settings.apiReturned": {
+      "zh-CN": "FAB API 返回：{detail}",
+      "en-US": "FAB API returned: {detail}"
+    },
+    "settings.notFound": {
+      "zh-CN": "未找到该订单",
+      "en-US": "Order not found"
+    },
+    "settings.pickProductAfterApiError": {
+      "zh-CN": "{error}；请选择认证产品后提交待审核",
+      "en-US": "{error}; select a verification product and submit for review"
+    },
+    "settings.submitted": {
+      "zh-CN": "订单已提交，请等待管理员审核",
+      "en-US": "Order submitted. Please wait for admin review"
+    },
+    "settings.verifyFailed": {
+      "zh-CN": "验证失败",
+      "en-US": "Verification failed"
+    },
+    "admin.title": {
+      "zh-CN": "FAB 购买认证审核",
+      "en-US": "FAB purchase verification review"
+    },
+    "admin.refresh": {
+      "zh-CN": "刷新",
+      "en-US": "Refresh"
+    },
+    "admin.userId": {
+      "zh-CN": "用户 ID",
+      "en-US": "User ID"
+    },
+    "admin.orderId": {
+      "zh-CN": "订单 ID",
+      "en-US": "Order ID"
+    },
+    "admin.product": {
+      "zh-CN": "插件/产品",
+      "en-US": "Plugin/Product"
+    },
+    "admin.status": {
+      "zh-CN": "状态",
+      "en-US": "Status"
+    },
+    "admin.submittedAt": {
+      "zh-CN": "提交时间",
+      "en-US": "Submitted"
+    },
+    "admin.actions": {
+      "zh-CN": "操作",
+      "en-US": "Actions"
+    },
+    "admin.loading": {
+      "zh-CN": "加载中…",
+      "en-US": "Loading..."
+    },
+    "admin.total": {
+      "zh-CN": "共 {count} 条订单申请",
+      "en-US": "{count} order requests"
+    },
+    "admin.empty": {
+      "zh-CN": "暂无验证申请",
+      "en-US": "No verification requests"
+    },
+    "admin.approve": {
+      "zh-CN": "通过",
+      "en-US": "Approve"
+    },
+    "admin.reject": {
+      "zh-CN": "拒绝",
+      "en-US": "Reject"
+    },
+    "admin.loadFailed": {
+      "zh-CN": "加载失败: {error}",
+      "en-US": "Load failed: {error}"
+    },
+    "admin.actionFailed": {
+      "zh-CN": "操作失败: {error}",
+      "en-US": "Action failed: {error}"
+    },
+    "admin.tab": {
+      "zh-CN": "FAB 认证",
+      "en-US": "FAB verification"
+    },
+    "config.purchaseUrl.label": {
+      "zh-CN": "购买记录地址",
+      "en-US": "Purchase history URL"
+    },
+    "config.purchaseUrl.description": {
+      "zh-CN": "用户点击“查看订单 ID”时打开的购买记录页面。",
+      "en-US": "Purchase history page opened by the View order ID button."
+    },
+    "config.purchaseUrl.placeholder": {
+      "zh-CN": "https://accounts.epicgames.com/account/transactions/purchases",
+      "en-US": "https://accounts.epicgames.com/account/transactions/purchases"
+    },
+    "settings.viewOrderId": {
+      "zh-CN": "查看订单 ID",
+      "en-US": "View order ID"
+    },
+    "settings.viewOrderIdHint": {
+      "zh-CN": "前往 Epic Games 购买记录查看订单 ID。",
+      "en-US": "Open Epic Games purchase history to find your order ID."
+    }
+  },
+  "css": ".fab-card{border:1px solid var(--border,#30363d);border-radius:12px;margin-top:12px;background:linear-gradient(180deg,rgba(88,166,255,.04),rgba(22,27,34,.92));overflow:hidden}.fab-card-hd{padding:12px 14px;border-bottom:1px solid var(--border,#30363d);display:flex;align-items:center;justify-content:space-between;gap:12px}.fab-card-title{min-width:0}.fab-card-hd h3{margin:0 0 4px;font-size:16px}.fab-card-hd p{margin:0;color:var(--muted,#8b949e);font-size:13px}.fab-card-body{padding:14px;display:flex;flex-direction:column;gap:12px;min-height:0}.fab-status{padding:0;font-size:13px}.fab-form{display:grid;grid-template-columns:minmax(160px,.9fr) minmax(240px,1fr);gap:8px;margin-top:0}.fab-form input,.fab-form select{flex:1;min-height:36px;border:1px solid var(--border,#30363d);border-radius:8px;background:#0b1017;color:#e6edf3;padding:0 10px;outline:none;font:inherit;font-size:13px;transition:border-color .14s}.fab-form input:focus{border-color:var(--accent,#58a6ff)}.fab-card-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:0 0 auto}.fab-card-hd button,.fab-card-hd .fab-order-help{height:36px;padding:0 16px;border:1px solid var(--accent,#58a6ff);border-radius:8px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s,border-color .15s,background-color .15s,color .15s;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;text-decoration:none}.fab-card-hd button{background:var(--accent,#58a6ff);color:#fff}.fab-card-hd .fab-order-help{background:rgba(88,166,255,.06);color:var(--text,#e6edf3);border-color:var(--border,#30363d)}.fab-card-hd .fab-order-help:hover{border-color:var(--accent,#58a6ff);color:var(--accent,#58a6ff);background:rgba(88,166,255,.1)}.fab-card-hd button:hover{opacity:.86}.fab-card-hd button:disabled{opacity:.5;cursor:wait}.fab-ok{color:#3fb950}.fab-warn{color:#d2991d}.fab-err{color:#f85149}.fab-order-list{display:grid;gap:8px;margin:8px 0 12px;max-height:230px;overflow:auto;padding-right:4px;align-content:start}.fab-order-list::-webkit-scrollbar{width:6px}.fab-order-list::-webkit-scrollbar-thumb{background:rgba(88,166,255,.45);border-radius:999px}.fab-order-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;overflow:hidden;border:1px solid var(--border,#30363d);border-radius:10px;background:rgba(13,17,23,.45);padding:10px}.fab-order-row strong{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fab-order-row small{display:block;margin-top:3px;color:var(--muted,#8b949e);font-size:12px}.fab-order-row>.fab-ok,.fab-order-row>.fab-warn,.fab-order-row>.fab-err{white-space:nowrap}.fab-card .badge-chip{width:30px;height:30px;padding:0;display:inline-flex;align-items:center;justify-content:center;gap:0;overflow:hidden}.fab-card .badge-chip span:last-child{display:none}.fab-card .badge-chip-img{width:20px;height:20px;border-radius:50%;object-fit:cover}.fab-card .badge-chip-icon{width:20px;height:20px;display:grid;place-items:center;border-radius:50%;font-size:10px;line-height:1;background:rgba(5,10,18,.45)}.fab-admin-table{width:100%;border-collapse:collapse;border:1px solid var(--border,#30363d);border-radius:10px;overflow:hidden;background:var(--surface,#161b22)}.fab-admin-table th{padding:8px 10px;text-align:left;font-size:12px;color:var(--muted,#8b949e);background:#111821;white-space:nowrap}.fab-admin-table td{padding:10px 10px;border-top:1px solid var(--border,#30363d);font-size:13px;vertical-align:middle}.fab-action-btn{padding:3px 10px;border-radius:6px;background:transparent;cursor:pointer;font-size:12px;transition:opacity .14s}.fab-action-btn:disabled{opacity:.45;cursor:wait}.fab-action-btn:hover{opacity:.75}@media(max-width:820px){.fab-form{grid-template-columns:1fr}.fab-order-row{grid-template-columns:1fr}}",
+  "html": "",
+  "js": "(function(){'use strict';\nvar PLUGIN_ID='fab-verify';\nvar BASE='/api/plugin/'+PLUGIN_ID+'/capability';\nvar DEFAULT_ICON='/assets/category-icons/general.svg';\nvar DEFAULT_PURCHASE_URL='https://accounts.epicgames.com/account/transactions/purchases';\nvar PLUGIN_CFG=((typeof plugin!=='undefined'&&plugin&&plugin.config)?plugin.config:null)||(window.ForumForge&&window.ForumForge.plugins&&window.ForumForge.plugins[PLUGIN_ID]&&window.ForumForge.plugins[PLUGIN_ID].config)||{};if(typeof PLUGIN_CFG==='string'){try{PLUGIN_CFG=JSON.parse(PLUGIN_CFG)||{};}catch(e){PLUGIN_CFG={};}}\nvar PLUGIN_I18N=((typeof plugin!=='undefined'&&plugin&&plugin.i18n)?plugin.i18n:null)||(window.ForumForge&&window.ForumForge.plugins&&window.ForumForge.plugins[PLUGIN_ID]&&window.ForumForge.plugins[PLUGIN_ID].i18n)||{};\nfunction cookieLocale(){var m=document.cookie.match(/(?:^|; )ff_locale=([^;]+)/);return m?decodeURIComponent(m[1]):'';}\nfunction locale(){try{return window.ADMIN_LOCALE||window.SITE_LOCALE||localStorage.getItem('ff.locale')||cookieLocale()||document.documentElement.lang||navigator.language||'zh-CN';}catch(e){return'zh-CN';}}\nfunction pickLocaleText(dict,loc){if(!dict)return'';loc=String(loc||'').replace('_','-');var base=loc.split('-')[0];return dict[loc]||dict[base]||(base==='zh'?dict['zh-CN']:base==='en'?dict['en-US']:'')||dict['zh-CN']||dict['en-US']||'';}\nfunction tt(key,fallback,vars){var dict=PLUGIN_I18N&&PLUGIN_I18N[key],s=pickLocaleText(dict,locale())||fallback||key;if(vars)Object.keys(vars).forEach(function(k){s=String(s).replace(new RegExp('\\\\{'+k+'\\\\}','g'),vars[k]);});return s;}\nfunction badgeLabel(productName){return productName+' '+tt('badge.verifiedBuyer','Verified Buyer');}\nfunction cfgArray(v){if(Array.isArray(v))return v;if(typeof v==='string'){try{var parsed=JSON.parse(v);return Array.isArray(parsed)?parsed:[];}catch(e){return[];}}return[];}\nfunction purchaseUrl(){var u=String(PLUGIN_CFG.purchase_url||DEFAULT_PURCHASE_URL).trim();return /^https?:\\/\\//i.test(u)?u:DEFAULT_PURCHASE_URL;}\nfunction products(){var p=cfgArray(PLUGIN_CFG.products);return p.map(function(x){return{key:String(x&&x.key||'').trim(),name:String(x&&x.name||x&&x.label||x&&x.key||'').trim(),icon:String(x&&x.icon||DEFAULT_ICON).trim(),color:String(x&&x.color||'#3fb950').trim(),description:String(x&&x.description||tt('badge.defaultDescription','FAB Marketplace purchase verification')).trim()};}).filter(function(x){return x.key&&x.name;});}\nfunction productByKey(key){var k=slug(key,'');return products().find(function(p){return slug(p.key,'')===k;})||null;}\nfunction activeStatus(item){var v=item&&item.value||{},d=item&&item.decision||{};return d.status||v.status||'pending';}\nfunction usedProductKeys(list){var used={};(list||[]).forEach(function(item){var st=activeStatus(item);if(st==='rejected')return;var v=item.value||{},d=item.decision||{},k=slug(d.product_key||v.product_key||'','');if(k)used[k]=1;});return used;}\nfunction productOptions(used){used=used||{};return products().filter(function(p){return !used[slug(p.key,'')];}).map(function(p){return'<option value=\"'+attr(p.key)+'\">'+esc(p.name)+' · '+esc(p.key)+'</option>';}).join('');}\nfunction esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\\"/g,'&quot;');}\nfunction attr(s){return esc(s).replace(/'/g,'&#39;');}\nfunction isImg(v){var s=String(v||'').trim().replace(/\\\\/g,'/');return /^(https?:\\/\\/|\\/|\\.\\/|\\.\\.\\/|assets\\/|data:image\\/)/i.test(s)||/\\.(png|jpe?g|gif|webp|svg|avif)(\\?.*)?$/i.test(s);}\nfunction slug(s,fallback){return String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64)||fallback||'order';}\nfunction orderKey(orderId){return 'order:'+slug(orderId,'order');}\nfunction decisionKey(uid,key){return 'order:'+uid+':'+key;}\nfunction statusText(s){return s==='approved'?tt('status.approved','Verified'):s==='rejected'?tt('status.rejected','Rejected'):tt('status.pending','Pending');}\nfunction statusCls(s){return s==='approved'?'fab-ok':s==='rejected'?'fab-err':'fab-warn';}\nfunction apiMe(){return fetch(BASE+'/me').then(function(r){return r.ok?r.json():null;});}\nfunction apiDb(body){var h={'Content-Type':'application/json'};if(typeof nonceHeaders==='function'){var n=nonceHeaders();h['X-Timestamp']=n['X-Timestamp'];h['X-Nonce']=n['X-Nonce'];}return fetch(BASE+'/db',{method:'POST',headers:h,body:JSON.stringify(body)}).then(function(r){return r.json().catch(function(){return{};}).then(function(d){if(!r.ok)throw new Error(d.error||'DB error '+r.status);return d;});});}\nfunction apiFetch(url,method,inject){var h={'Content-Type':'application/json'};if(typeof nonceHeaders==='function'){var n=nonceHeaders();h['X-Timestamp']=n['X-Timestamp'];h['X-Nonce']=n['X-Nonce'];}return fetch(BASE+'/fetch',{method:'POST',headers:h,body:JSON.stringify({url:url,method:method||'GET',inject_config:inject||{}})}).then(function(r){return r.json();});}\nfunction findString(obj,names,depth){if(!obj||depth>4)return'';if(Array.isArray(obj)){for(var i=0;i<obj.length;i++){var x=findString(obj[i],names,depth+1);if(x)return x;}return'';}if(typeof obj==='object'){for(var k in obj){if(names.indexOf(String(k).toLowerCase())>=0&&typeof obj[k]==='string'&&obj[k].trim())return obj[k].trim();}for(var k2 in obj){var y=findString(obj[k2],names,depth+1);if(y)return y;}}return'';}\nfunction productFromOrder(order,selectedKey,orderId){var foundKey=findString(order,['product_id','productid','plugin_id','pluginid','asset_id','assetid','listing_id','listingid','slug','namespace'],0);var picked=productByKey(foundKey)||productByKey(selectedKey);if(!picked)picked={key:selectedKey,name:selectedKey,icon:DEFAULT_ICON,color:'#3fb950',description:tt('badge.defaultDescription','FAB Marketplace purchase verification')};return{product_name:picked.name,product_key:slug(picked.key,slug(orderId,'order')),product_icon:picked.icon,product_color:picked.color,product_description:picked.description,source_key:foundKey?'fab':'config'};}\nfunction badgeFor(v){var productKey=slug(v&&v.product_key||v&&v.order_id,'order'),p=productByKey(productKey)||productByKey(v&&v.product_key)||null;var productName=String(v&&v.product_name||p&&p.name||'FAB').trim()||'FAB';var label=String(v&&v.badge_label||badgeLabel(productName));return{badge_key:'fab-'+productKey,label:label,description:String(v&&v.product_description||p&&p.description||tt('badge.defaultDescription','FAB Marketplace purchase verification')),color:String(v&&v.product_color||p&&p.color||'#3fb950'),icon:String(v&&v.product_icon||p&&p.icon||DEFAULT_ICON)};}\nfunction bchip(b){var s=b.color?'border-color:'+esc(b.color)+'66;color:'+esc(b.color)+';background:'+esc(b.color)+'1f':'';var label=String(b&&b.label||'').trim();var fallback=(label||'?').slice(0,1).toUpperCase();var media=b.icon?(isImg(b.icon)?'<img class=\"badge-chip-img\" src=\"'+attr(b.icon)+'\" alt=\"\">':'<span class=\"badge-chip-icon\">'+esc(String(b.icon).slice(0,2))+'</span>'):'<span class=\"badge-chip-icon\">'+esc(fallback)+'</span>';return'<span class=\"badge-chip badge-chip-icon-only\"'+(s?' style=\"'+s+'\"':'')+' title=\"'+attr(b.description||label||'')+'\" aria-label=\"'+attr(label)+'\">'+media+'</span>';}\nasync function decisionFor(userId,key){var d=await apiDb({op:'get',collection:'decisions',key:decisionKey(userId,key),scope:'shared'}).catch(function(){return null;});if(d&&d.found)return d.value;return null;}\nasync function userOrders(user){var res=await apiDb({op:'list',collection:'verify',limit:100}).catch(function(){return{items:[]};});var items=res.items||[];var out=[];for(var i=0;i<items.length;i++){var item=items[i],v=item.value||{};var dec=await decisionFor(user.id,item.key);if(!dec&&item.key==='pending'){var old=await apiDb({op:'get',collection:'decisions',key:'u'+user.id,scope:'shared'}).catch(function(){return null;});if(old&&old.found)dec=old.value;}out.push({key:item.key,value:v,decision:dec});}return out;}\nfunction renderStatus(list){if(!list.length)return'<div class=\"fab-status muted\">'+esc(tt('settings.noOrders','No verification orders'))+'</div>';return'<div class=\"fab-order-list\">'+list.map(function(item){var v=item.value||{},d=item.decision||{},st=d.status||v.status||'pending',bd=badgeFor(Object.assign({},v,d));return'<div class=\"fab-order-row\"><div><strong>'+esc(v.product_name||'FAB')+'</strong><small>'+esc(v.order_id||item.key)+'</small></div><span class=\"'+statusCls(st)+'\">'+statusText(st)+'</span>'+(st==='approved'?bchip({label:bd.label,icon:bd.icon,color:bd.color,description:bd.description}):'')+(st==='rejected'&&d.reason?'<small class=\"fab-err\">'+esc(d.reason)+'</small>':'')+'</div>';}).join('')+'</div>';}\nvar slot=document.getElementById('ff-plugin-settings-slot');if(slot){slot.innerHTML='<div class=\"fab-card\"><div class=\"fab-card-hd\"><div class=\"fab-card-title\"><h3>'+esc(tt('settings.title','FAB Purchase Verification'))+'</h3><p>'+esc(tt('settings.description','Orders are reviewed against products configured by the plugin. Approved orders grant matching badges.'))+'</p></div><div class=\"fab-card-actions\"><a id=\"fab-order-help\" class=\"btn fab-order-help\" href=\"'+attr(purchaseUrl())+'\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"'+attr(tt('settings.viewOrderIdHint','Open Epic Games purchase history to find your order ID.'))+'\">'+esc(tt('settings.viewOrderId','View order ID'))+'</a><button id=\"fab-submit\" class=\"btn primary\" type=\"button\">'+esc(tt('settings.submit','Submit'))+'</button></div></div><div class=\"fab-card-body\"><div id=\"fab-status\" class=\"fab-status muted\">'+esc(tt('settings.loading','Loading...'))+'</div><div class=\"fab-form\"><input id=\"fab-order\" type=\"text\" placeholder=\"'+attr(tt('settings.orderPlaceholder','FAB order ID'))+'\" autocomplete=\"off\"><select id=\"fab-product-key\"><option value=\"\">'+esc(tt('settings.selectProduct','Select product'))+'</option>'+productOptions()+'</select></div><div id=\"fab-msg\" style=\"min-height:18px;font-size:13px\"></div></div></div>';var statusEl=document.getElementById('fab-status'),msgEl=document.getElementById('fab-msg'),btn=document.getElementById('fab-submit'),input=document.getElementById('fab-order'),prodKeyInput=document.getElementById('fab-product-key'),currentUser=null,currentOrders=[];function refreshProductOptions(list){currentOrders=list||[];var selected=prodKeyInput.value,opts=productOptions(usedProductKeys(currentOrders));prodKeyInput.innerHTML='<option value=\"\">'+(opts?tt('settings.selectProduct','Select product'):tt('settings.noProducts','No products available'))+'</option>'+opts;if(selected&&Array.from(prodKeyInput.options).some(function(o){return o.value===selected;}))prodKeyInput.value=selected;btn.disabled=!opts;}async function reloadUser(){try{currentUser=await apiMe();if(!currentUser){statusEl.textContent=tt('settings.loginRequired','Please sign in first');return;}currentOrders=await userOrders(currentUser);statusEl.innerHTML=renderStatus(currentOrders);refreshProductOptions(currentOrders);}catch(e){statusEl.textContent=tt('settings.loadFailed','Failed to load');}}reloadUser();btn.addEventListener('click',async function(){var orderId=input.value.trim(),manualKey=prodKeyInput.value.trim();if(!orderId){msgEl.className='fab-err';msgEl.textContent=tt('settings.orderRequired','Enter an order ID');return;}if(!manualKey){msgEl.className='fab-err';msgEl.textContent=tt('settings.productRequired','Select a verification product');return;}if(usedProductKeys(currentOrders)[slug(manualKey,'')]){msgEl.className='fab-err';msgEl.textContent=tt('settings.duplicateProduct','This product is already requested or verified');refreshProductOptions(currentOrders);return;}btn.disabled=true;btn.textContent=tt('settings.verifying','Verifying...');msgEl.textContent='';try{var user=currentUser||await apiMe();if(!user)throw new Error(tt('settings.loginRequired','Please sign in first'));var result=await apiFetch('https://www.fab.com/seller/orders/v2?order_id='+encodeURIComponent(orderId),'GET',{cookie:'fab_sessionid'});var order=null,apiOk=!!result.ok,apiError='';if(result.body){try{order=JSON.parse(result.body);}catch(e){apiError=tt('settings.responseFormatError','FAB API response format error');}}if(!apiOk){apiError=tt('settings.requestFailed','FAB API request failed (HTTP {status})',{status:result.status});}if(order&&order.detail&&order.detail.orderId){apiError=tt('settings.apiReturned','FAB API returned: {detail}',{detail:String(order.detail.orderId.join?order.detail.orderId.join(', '):order.detail.orderId)});apiOk=false;}if(apiOk&&(!order||(Array.isArray(order.results)&&order.results.length===0))){apiError=tt('settings.notFound','Order not found');apiOk=false;}if(!apiOk&&!manualKey)throw new Error(tt('settings.pickProductAfterApiError','{error}; select a verification product and submit for review',{error:apiError}));var meta=productFromOrder(apiOk?order:null,manualKey,orderId);await apiDb({op:'set',collection:'verify',key:orderKey(orderId),value:{order_id:orderId,status:'pending',product_key:meta.product_key,product_name:meta.product_name,product_icon:meta.product_icon,product_color:meta.product_color,product_description:meta.product_description,product_source:meta.source_key,order_snippet:JSON.stringify(order||{api_error:apiError,manual_product_key:manualKey}).slice(0,1500),submitted_at:new Date().toISOString()}});input.value='';prodKeyInput.value='';msgEl.className='fab-warn';msgEl.textContent=tt('settings.submitted','Order submitted. Please wait for admin review');await reloadUser();}catch(e){msgEl.className='fab-err';msgEl.textContent=e.message||tt('settings.verifyFailed','Verification failed');}finally{btn.disabled=false;btn.textContent=tt('settings.submit','Submit');}});}\nfunction createWb(root){root.innerHTML='<div class=\"admin-workbench\"><div class=\"admin-toolbar\"><span style=\"font-weight:750\">'+esc(tt('admin.title','FAB purchase verification review'))+'</span><button class=\"btn btn-sm ml-auto\" data-fab-ref>'+esc(tt('admin.refresh','Refresh'))+'</button></div><div class=\"admin-table-shell\"><div class=\"admin-table-scroll\"><table class=\"table\" style=\"min-width:860px\"><thead><tr><th style=\"width:80px\">'+esc(tt('admin.userId','User ID'))+'</th><th style=\"width:210px\">'+esc(tt('admin.orderId','Order ID'))+'</th><th style=\"width:190px\">'+esc(tt('admin.product','Plugin/Product'))+'</th><th style=\"width:110px\">'+esc(tt('admin.status','Status'))+'</th><th style=\"width:150px\">'+esc(tt('admin.submittedAt','Submitted'))+'</th><th>'+esc(tt('admin.actions','Actions'))+'</th></tr></thead><tbody data-fab-tbd><tr><td colspan=\"6\" style=\"text-align:center;padding:32px;color:var(--muted)\">'+esc(tt('admin.loading','Loading...'))+'</td></tr></tbody></table></div><div class=\"admin-footer\"><span data-fab-cnt style=\"color:var(--muted);font-size:13px\"></span></div></div></div>';var tbody=root.querySelector('[data-fab-tbd]'),cnt=root.querySelector('[data-fab-cnt]'),ref=root.querySelector('[data-fab-ref]');async function load(){try{var res=await apiDb({op:'list',collection:'verify',all_users:true,limit:200});var items=res.items||[];var dr=await apiDb({op:'list',collection:'decisions',scope:'shared',key_prefix:'order:',limit:200}).catch(function(){return{items:[]};});var dec={};(dr.items||[]).forEach(function(d){dec[d.key]=d.value;});if(cnt)cnt.textContent=tt('admin.total','{count} order requests',{count:items.length});if(!items.length){tbody.innerHTML='<tr><td colspan=\"6\" style=\"text-align:center;padding:32px;color:var(--muted)\">'+esc(tt('admin.empty','No verification requests'))+'</td></tr>';return;}tbody.innerHTML=items.map(function(item){var v=item.value||{},dk=decisionKey(item.user_id,item.key),d=dec[dk]||{},st=d.status||v.status||'pending',bd=badgeFor(Object.assign({},v,d)),badge=st==='approved'?'<span class=\"badge badge-ok\">'+esc(tt('status.approved','Verified'))+'</span>':st==='rejected'?'<span class=\"badge\" style=\"border-color:#5a1e27;color:#f85149;background:#2d1216\">'+esc(tt('status.rejected','Rejected'))+'</span>':'<span class=\"badge badge-info\">'+esc(tt('status.pending','Pending'))+'</span>';var acts='';if(st!=='approved')acts+='<button class=\"btn btn-sm btn-ok fab-act\" data-act=\"approve\" data-uid=\"'+esc(item.user_id)+'\" data-key=\"'+attr(item.key)+'\">'+esc(tt('admin.approve','Approve'))+'</button> ';if(st!=='rejected')acts+='<button class=\"btn btn-sm btn-danger fab-act\" data-act=\"reject\" data-uid=\"'+esc(item.user_id)+'\" data-key=\"'+attr(item.key)+'\">'+esc(tt('admin.reject','Reject'))+'</button>';var time=((v.submitted_at||item.updated_at||'').replace('T',' ')).slice(0,16);return'<tr data-row=\"'+attr(item.user_id+':'+item.key)+'\"><td><span class=\"admin-cell-main\">'+esc(item.user_id)+'</span></td><td><code style=\"font-size:12px;color:var(--muted)\">'+esc(v.order_id||item.key)+'</code></td><td><div style=\"display:grid;gap:5px;justify-items:start\">'+bchip({label:bd.label,icon:bd.icon,color:bd.color,description:bd.description})+'<code style=\"font-size:11px;color:var(--muted)\">'+esc(v.product_key||bd.badge_key)+'</code></div></td><td>'+badge+'</td><td style=\"color:var(--muted);font-size:12px\">'+esc(time)+'</td><td><div class=\"admin-row-actions\">'+acts+'</div></td></tr>';}).join('');root._fabItems={};items.forEach(function(item){root._fabItems[item.user_id+':'+item.key]=item;});}catch(e){if(tbody)tbody.innerHTML='<tr><td colspan=\"6\" style=\"color:#f85149;padding:16px\">'+esc(tt('admin.loadFailed','Load failed: {error}',{error:e.message||String(e)}))+'</td></tr>';}}ref.addEventListener('click',load);root.addEventListener('click',async function(e){var b=e.target.closest('.fab-act');if(!b)return;var act=b.dataset.act,uid=Number(b.dataset.uid),key=b.dataset.key,item=root._fabItems&&root._fabItems[uid+':'+key];if(!item)return;var v=item.value||{},bd=badgeFor(v),dk=decisionKey(uid,key);b.disabled=true;b.textContent='…';try{await apiDb({op:'set',collection:'decisions',key:dk,value:{status:act==='approve'?'approved':'rejected',order_id:v.order_id,product_key:v.product_key,product_name:v.product_name,product_icon:bd.icon,product_color:bd.color,product_description:bd.description,badge_key:bd.badge_key,badge_label:bd.label,icon:bd.icon,color:bd.color,updated_at:new Date().toISOString()},scope:'shared'});if(act==='approve'){await apiDb({op:'grant_badge',badge_key:bd.badge_key,label:bd.label,description:bd.description,color:bd.color,icon:bd.icon,target_user_id:uid});}else{await apiDb({op:'revoke_badge',badge_key:bd.badge_key,target_user_id:uid}).catch(function(){});}await load();}catch(e){b.disabled=false;b.textContent=act==='approve'?tt('admin.approve','Approve'):tt('admin.reject','Reject');alert(tt('admin.actionFailed','Action failed: {error}',{error:e.message}));}});load();}\nvar adminRoot=document.getElementById('ff-plugin-admin-root');if(adminRoot){createWb(adminRoot);}var badgeTabs=(window.ForumForgePluginUI&&window.ForumForgePluginUI.registerBadgeTab)?window.ForumForgePluginUI:(window.FF_BadgePage&&window.FF_BadgePage.registerTab?window.FF_BadgePage:null);function refreshTabLabel(){var tab=document.querySelector('#ff-badge-tab-bar [data-btab=\\\"fab-verify\\\"]');if(tab)tab.textContent=tt('admin.tab','FAB verification');}if(badgeTabs&&badgeTabs.registerBadgeTab){badgeTabs.registerBadgeTab('fab-verify',tt('admin.tab','FAB verification'),function(panel){createWb(panel);});refreshTabLabel();window.addEventListener('forumforge:localechange',refreshTabLabel);}else if(badgeTabs&&badgeTabs.registerTab){badgeTabs.registerTab('fab-verify',tt('admin.tab','FAB verification'),function(panel){createWb(panel);});refreshTabLabel();window.addEventListener('forumforge:localechange',refreshTabLabel);}\n})();"
+}

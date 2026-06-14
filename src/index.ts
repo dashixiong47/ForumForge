@@ -22,6 +22,7 @@ import { normalizePluginId } from './plugins/registry';
 import { renderSiteRoute } from './pages/site-routes';
 import { renderAdminRoute } from './pages/admin-routes';
 import { siteHtmlResponse, type SiteBrand } from './site/ssr';
+import { BUILTIN_TRANSLATIONS } from './i18n/seed';
 import { handlePublicApi } from './api/public';
 import { handlePluginApi } from './api/plugins';
 import { handleAdminSettingsApi } from './api/admin-settings';
@@ -33,11 +34,13 @@ import { handlePostsApi } from './api/posts';
 import { handleTaxonomyApi } from './api/taxonomy';
 import { handleAdminUsersApi } from './api/admin-users';
 import { handlePluginResourceApi } from './api/plugin-resources';
+import { handlePluginCapability } from './api/plugin-capability';
 import { verifyTurnstile } from './core/turnstile';
 import { hasControlCharacters, hasInvisibleCharacters, hasRestrictedKeywords, isVisuallyEmpty } from './core/validation';
 import { ensureBootstrap } from './services/bootstrap';
 import { FALLBACK_LOCALE, normalizeLocaleValue, pickLocaleFromAcceptLanguage } from './core/locale';
 import { decodePublicId, publicPostPath } from './core/id-codec';
+import { handleAdminContentApi } from './api/admin-content-routes';
 import { handleOAuthRequest, loadOAuthPublicProviders } from './auth/oauth';
 import { isLocalRequest } from './core/env';
 import { CATEGORY_ICONS } from './assets/category-icons';
@@ -996,8 +999,19 @@ tick();setInterval(tick,1000);
 
 		const getSystemTranslations = async (locale: string) => {
 			return cachedRead(`i18n:system:${locale}`, async () => {
+				const mergeBuiltins = (base: Record<string, string>) => {
+					const map = { ...base };
+					for (const entry of BUILTIN_TRANSLATIONS) {
+						if (!map[entry.key]) map[entry.key] = locale === 'zh-CN' ? entry.zh : entry.en;
+					}
+					return map;
+				};
 				const kvHit = await kvGetSystemTranslations<Record<string, string>>(kv, locale).catch(() => null);
-				if (kvHit) return kvHit;
+				if (kvHit) {
+					const map = mergeBuiltins(kvHit);
+					ctx.waitUntil(kvSetSystemTranslations(kv, locale, map).catch(() => {}));
+					return map;
+				}
 				const fallback = locale === 'zh-CN' ? 'en-US' : 'zh-CN';
 				const { results } = await db.prepare(
 					`SELECT key,
@@ -1012,8 +1026,9 @@ tick();setInterval(tick,1000);
 				).bind(locale, fallback, locale, fallback).all();
 				const map: Record<string, string> = {};
 				for (const row of (results || []) as any[]) map[String(row.key)] = String(row.value || row.key);
-				ctx.waitUntil(kvSetSystemTranslations(kv, locale, map).catch(() => {}));
-				return map;
+				const merged = mergeBuiltins(map);
+				ctx.waitUntil(kvSetSystemTranslations(kv, locale, merged).catch(() => {}));
+				return merged;
 			});
 		};
 
@@ -1440,435 +1455,68 @@ tick();setInterval(tick,1000);
 		});
 		if (adminUsersApiResponse) return adminUsersApiResponse;
 
-		// --- ADMIN ROUTES ---
+		const userBadgesMatch = url.pathname.match(/^\/api\/users\/(\d+)\/badges$/);
+		if (userBadgesMatch && method === 'GET') {
+			const userId = Number(userBadgesMatch[1]);
+			if (!userId) return jsonResponse({ error: 'Invalid user ID' }, 400);
+			const result = await db.prepare(
+				`SELECT ub.plugin_id, ub.badge_key,
+				        COALESCE(NULLIF(bd.label,''), ub.label) AS label,
+				        COALESCE(NULLIF(bd.color,''), ub.color) AS color,
+				        COALESCE(NULLIF(bd.icon,''), ub.icon) AS icon,
+				        COALESCE(NULLIF(bd.description,''), ub.description) AS description
+				 FROM user_badges ub
+				 LEFT JOIN badge_definitions bd ON bd.plugin_id = ub.plugin_id AND bd.badge_key = ub.badge_key
+				 JOIN plugins p ON p.id = ub.plugin_id AND p.enabled = 1 AND COALESCE(p.deleted_at, 0) = 0
+				 WHERE ub.user_id = ? AND ub.enabled = 1 AND bd.id IS NOT NULL AND bd.enabled = 1
+				 ORDER BY ub.granted_at ASC`
+			).bind(userId).all<{ plugin_id: string; badge_key: string; label: string; color: string; icon: string; description: string }>();
+			return jsonResponse(result.results || []);
+		}
 
-		// POST /api/admin/posts/bulk-delete
-		if (url.pathname === '/api/admin/posts/bulk-delete' && method === 'POST') {
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-				const { ids } = await request.json() as { ids: number[] };
-				if (!ids || !Array.isArray(ids) || ids.length === 0) return jsonResponse({ error: 'Missing post ids' }, 400);
-
-				const now = Math.floor(Date.now() / 1000);
-				for (const id of ids) {
-					await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
-					await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
+		if (url.pathname.startsWith('/api/plugin/')) {
+			const pluginId = url.pathname.slice('/api/plugin/'.length).split('/')[0];
+			if (pluginId) {
+				const afterPluginId = url.pathname.slice(`/api/plugin/${pluginId}`.length);
+				if (afterPluginId.startsWith('/capability')) {
+					const capabilityPath = afterPluginId.slice('/capability'.length) || '/';
+					const capResp = await handlePluginCapability({ pluginId, capabilityPath, method, request, db, authenticate, jsonResponse, handleError });
+					if (capResp) return capResp;
 				}
-				await security.logAudit(userPayload.id, 'ADMIN_BULK_DELETE_POSTS', 'post', ids.join(','), {}, request);
-				invalidatePublicContent('admin:posts:bulk-delete');
-				return jsonResponse({ success: true, deleted: ids.length });
-			} catch (e) {
-				return handleError(e);
 			}
 		}
 
-		// DELETE /api/admin/posts/:id
-		if (url.pathname.startsWith('/api/admin/posts/') && method === 'DELETE') {
-			const id = url.pathname.split('/').pop();
+		const ensureBadgeDefinitionDescription = async () => {
 			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-
-				const now = Math.floor(Date.now() / 1000);
-				await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
-				await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
-				
-				await security.logAudit(userPayload.id, 'ADMIN_DELETE_POST', 'post', String(id), {}, request);
-				invalidatePublicContent('admin:post:delete');
-				return jsonResponse({ success: true });
-			} catch (e) {
-				return handleError(e);
+				await db.prepare("ALTER TABLE badge_definitions ADD COLUMN description TEXT DEFAULT ''").run();
+			} catch {
+				// Existing local/remote databases may already have the column.
 			}
-		}
+		};
+		const notifyBadgeChange = async (badgeId: number, type: string, title: string, bodyPrefix: string) => {
+			const row = await db.prepare(
+				`SELECT ub.user_id, ub.badge_key,
+				        COALESCE(NULLIF(bd.label,''), ub.label, ub.badge_key) AS label,
+				        ub.plugin_id
+				   FROM user_badges ub
+				   LEFT JOIN badge_definitions bd ON bd.plugin_id = ub.plugin_id AND bd.badge_key = ub.badge_key
+				  WHERE ub.id = ?`
+			).bind(badgeId).first<{ user_id: number; badge_key: string; label: string; plugin_id: string }>();
+			if (!row?.user_id) return null;
+			await createNotification(row.user_id, type, title, `${bodyPrefix}「${row.label || row.badge_key}」。`, {
+				meta: { badge_id: badgeId, badge_key: row.badge_key, plugin_id: row.plugin_id },
+			});
+			return row;
+		};
 
-		// PUT /api/admin/comments/:id
-		if (url.pathname.match(/^\/api\/admin\/comments\/\d+$/) && method === 'PUT') {
-			const id = url.pathname.split('/').pop();
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-
-				const body = await request.json() as any;
-				const content = String(body.content || '');
-				if (!content || content.length > 3000) return jsonResponse({ error: 'Content too long' }, 400);
-				if (isVisuallyEmpty(content)) return jsonResponse({ error: 'Comment cannot be empty' }, 400);
-				if (hasInvisibleCharacters(content)) return jsonResponse({ error: 'Comment contains invalid invisible characters' }, 400);
-				if (hasControlCharacters(content)) return jsonResponse({ error: 'Comment contains invalid control characters' }, 400);
-
-				const existing = await db.prepare('SELECT id FROM comments WHERE id = ?').bind(id).first<{ id: number }>();
-				if (!existing) return jsonResponse({ error: 'Comment not found' }, 404);
-
-				await db.prepare('UPDATE comments SET content = ? WHERE id = ?').bind(content.trim(), id).run();
-				await security.logAudit(userPayload.id, 'ADMIN_UPDATE_COMMENT', 'comment', String(id), { content_length: content.length }, request);
-				invalidatePublicContent('admin:comment:update');
-				return jsonResponse({ success: true });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/moderation/:type/:id
-		if (url.pathname.match(/^\/api\/admin\/moderation\/(post|comment)\/\d+$/) && method === 'POST') {
-			const [, type, id] = url.pathname.match(/^\/api\/admin\/moderation\/(post|comment)\/(\d+)$/) || [];
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, 'moderation');
-				const body = await request.json() as any;
-				const nextStatus = String(body.status || '') === 'rejected' ? 'rejected' : 'approved';
-				const reason = nextStatus === 'rejected' ? String(body.reason || '').trim().slice(0, 500) : '';
-				let moderatedPostId: number | string | null = null;
-				if (type === 'post') {
-					const post = await db.prepare('SELECT id, author_id, title, status FROM posts WHERE id = ?').bind(id).first<{ id: number; author_id: number; title?: string; status?: string }>();
-					if (!post) return jsonResponse({ error: 'Post not found' }, 404);
-					moderatedPostId = post.id;
-					await db.prepare('UPDATE posts SET status = ?, rejection_reason = ? WHERE id = ?').bind(nextStatus, reason, id).run();
-					if (nextStatus === 'approved' && post.status !== 'approved') {
-						await awardUserProgress(Number(post.author_id), 'create_post', { postId: id });
-					}
-					await createNotification(Number(post.author_id), nextStatus === 'approved' ? 'post_approved' : 'post_rejected', nextStatus === 'approved' ? '帖子已通过审核' : '帖子被拒绝', nextStatus === 'approved' ? `《${post.title || '帖子'}》已发布。` : reason || '你的帖子未通过审核。', { postId: id });
-					await security.logAudit(userPayload.id, 'MODERATE_POST', 'post', String(id), { status: nextStatus, reason }, request);
-				} else {
-					const comment = await db.prepare('SELECT id, author_id, post_id, parent_id, status FROM comments WHERE id = ?').bind(id).first<{ id: number; author_id: number; post_id: number; parent_id?: number | null; status?: string }>();
-					if (!comment) return jsonResponse({ error: 'Comment not found' }, 404);
-					moderatedPostId = comment.post_id;
-					await db.prepare('UPDATE comments SET status = ?, rejection_reason = ? WHERE id = ?').bind(nextStatus, reason, id).run();
-					if (nextStatus === 'approved' && comment.status !== 'approved') {
-						const post = await db.prepare('SELECT author_id, title FROM posts WHERE id = ?').bind(comment.post_id).first<{ author_id: number; title?: string }>();
-						await awardUserProgress(Number(comment.author_id), 'reply_post', { postId: comment.post_id, commentId: id });
-						if (post && Number(post.author_id) !== Number(comment.author_id)) {
-							await awardUserProgress(Number(post.author_id), 'post_replied', { postId: comment.post_id, commentId: id, meta: { reply_author_id: comment.author_id } });
-							await createNotification(Number(post.author_id), 'post_replied', '帖子收到新回复', `《${post.title || '帖子'}》有新的回复。`, { postId: comment.post_id, commentId: id });
-						}
-						if (comment.parent_id) {
-							const parent = await db.prepare('SELECT author_id FROM comments WHERE id = ?').bind(comment.parent_id).first<{ author_id: number }>();
-							if (parent && Number(parent.author_id) !== Number(comment.author_id)) {
-								await createNotification(Number(parent.author_id), 'comment_replied', '你的回复收到回复', '有人回复了你的评论。', { postId: comment.post_id, commentId: id, meta: { parent_comment_id: comment.parent_id } });
-							}
-						}
-					}
-					await createNotification(Number(comment.author_id), nextStatus === 'approved' ? 'comment_approved' : 'comment_rejected', nextStatus === 'approved' ? '评论已通过审核' : '评论被拒绝', nextStatus === 'approved' ? '你的评论已显示。' : reason || '你的评论未通过审核。', { postId: comment.post_id, commentId: id });
-					await security.logAudit(userPayload.id, 'MODERATE_COMMENT', 'comment', String(id), { status: nextStatus, reason }, request);
-				}
-				invalidatePublicContent(`moderation:${type}:${nextStatus}`);
-				return jsonResponse({ success: true, status: nextStatus, url: moderatedPostId ? publicPostPath(moderatedPostId, runtimeEnvForLinks) : undefined });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/moderation/bulk-status
-		if (url.pathname === '/api/admin/moderation/bulk-status' && method === 'POST') {
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, 'moderation');
-				const body = await request.json() as any;
-				const nextStatus = String(body.status || '') === 'rejected' ? 'rejected' : 'approved';
-				const reason = nextStatus === 'rejected' ? String(body.reason || '').trim().slice(0, 500) : '';
-				const items = Array.isArray(body.items)
-					? body.items
-						.map((item: any) => ({ type: String(item.type || ''), id: Number(item.id) }))
-						.filter((item: any) => (item.type === 'post' || item.type === 'comment') && Number.isInteger(item.id) && item.id > 0)
-						.slice(0, 500)
-					: [];
-				if (!items.length) return jsonResponse({ error: 'Missing moderation items' }, 400);
-				let updated = 0;
-				for (const item of items) {
-					if (item.type === 'post') {
-						const post = await db.prepare('SELECT id, author_id, title, status FROM posts WHERE id = ?').bind(item.id).first<{ id: number; author_id: number; title?: string; status?: string }>();
-						if (!post) continue;
-						await db.prepare('UPDATE posts SET status = ?, rejection_reason = ? WHERE id = ?').bind(nextStatus, reason, item.id).run();
-						if (nextStatus === 'approved' && post.status !== 'approved') {
-							await awardUserProgress(Number(post.author_id), 'create_post', { postId: item.id });
-						}
-						await createNotification(Number(post.author_id), nextStatus === 'approved' ? 'post_approved' : 'post_rejected', nextStatus === 'approved' ? '帖子已通过审核' : '帖子被拒绝', nextStatus === 'approved' ? `《${post.title || '帖子'}》已发布。` : reason || '你的帖子未通过审核。', { postId: item.id });
-						updated++;
-					} else {
-						const comment = await db.prepare('SELECT id, author_id, post_id, parent_id, status FROM comments WHERE id = ?').bind(item.id).first<{ id: number; author_id: number; post_id: number; parent_id?: number | null; status?: string }>();
-						if (!comment) continue;
-						await db.prepare('UPDATE comments SET status = ?, rejection_reason = ? WHERE id = ?').bind(nextStatus, reason, item.id).run();
-						if (nextStatus === 'approved' && comment.status !== 'approved') {
-							const post = await db.prepare('SELECT author_id, title FROM posts WHERE id = ?').bind(comment.post_id).first<{ author_id: number; title?: string }>();
-							await awardUserProgress(Number(comment.author_id), 'reply_post', { postId: comment.post_id, commentId: item.id });
-							if (post && Number(post.author_id) !== Number(comment.author_id)) {
-								await awardUserProgress(Number(post.author_id), 'post_replied', { postId: comment.post_id, commentId: item.id, meta: { reply_author_id: comment.author_id } });
-								await createNotification(Number(post.author_id), 'post_replied', '帖子收到新回复', `《${post.title || '帖子'}》有新的回复。`, { postId: comment.post_id, commentId: item.id });
-							}
-							if (comment.parent_id) {
-								const parent = await db.prepare('SELECT author_id FROM comments WHERE id = ?').bind(comment.parent_id).first<{ author_id: number }>();
-								if (parent && Number(parent.author_id) !== Number(comment.author_id)) {
-									await createNotification(Number(parent.author_id), 'comment_replied', '你的回复收到回复', '有人回复了你的评论。', { postId: comment.post_id, commentId: item.id, meta: { parent_comment_id: comment.parent_id } });
-								}
-							}
-						}
-						await createNotification(Number(comment.author_id), nextStatus === 'approved' ? 'comment_approved' : 'comment_rejected', nextStatus === 'approved' ? '评论已通过审核' : '评论被拒绝', nextStatus === 'approved' ? '你的评论已显示。' : reason || '你的评论未通过审核。', { postId: comment.post_id, commentId: item.id });
-						updated++;
-					}
-				}
-				await security.logAudit(userPayload.id, 'BULK_MODERATION_STATUS', 'moderation', String(updated), { status: nextStatus, requested: items.length, reason }, request);
-				if (updated) invalidatePublicContent(`moderation:bulk-status:${nextStatus}`);
-				return jsonResponse({ success: true, status: nextStatus, count: updated });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/moderation/bulk-delete
-		if (url.pathname === '/api/admin/moderation/bulk-delete' && method === 'POST') {
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, 'moderation');
-				const body = await request.json() as any;
-				const items = Array.isArray(body.items)
-					? body.items
-						.map((item: any) => ({ type: String(item.type || ''), id: Number(item.id) }))
-						.filter((item: any) => (item.type === 'post' || item.type === 'comment') && Number.isInteger(item.id) && item.id > 0)
-						.slice(0, 500)
-					: [];
-				if (!items.length) return jsonResponse({ error: 'Missing moderation items' }, 400);
-				let deleted = 0;
-				for (const item of items) {
-					if (item.type === 'post') {
-						const post = await db.prepare('SELECT id FROM posts WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(item.id).first();
-						if (!post) continue;
-						const now = Math.floor(Date.now() / 1000);
-						await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, item.id).run();
-						await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, item.id).run();
-						deleted++;
-					} else {
-						const now = Math.floor(Date.now() / 1000);
-						const changed = await db.prepare(`
-							WITH RECURSIVE comment_tree(id, depth) AS (
-								SELECT id, 0 FROM comments WHERE id = ?
-								UNION ALL
-								SELECT c.id, comment_tree.depth + 1
-								FROM comments c
-								JOIN comment_tree ON c.parent_id = comment_tree.id
-							)
-							UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
-						`).bind(item.id, now, userPayload.id).run();
-						if (!changed.success) continue;
-						deleted++;
-					}
-				}
-				await security.logAudit(userPayload.id, 'BULK_MODERATION_DELETE', 'moderation', String(deleted), { requested: items.length }, request);
-				if (deleted) invalidatePublicContent('moderation:bulk-delete');
-				return jsonResponse({ success: true, count: deleted });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// DELETE /api/admin/moderation/:type/:id
-		if (url.pathname.match(/^\/api\/admin\/moderation\/(post|comment)\/\d+$/) && method === 'DELETE') {
-			const [, type, id] = url.pathname.match(/^\/api\/admin\/moderation\/(post|comment)\/(\d+)$/) || [];
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-				if (type === 'post') {
-					const now = Math.floor(Date.now() / 1000);
-					await db.prepare('UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE post_id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
-					await db.prepare('UPDATE posts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND COALESCE(deleted_at, 0) = 0').bind(now, userPayload.id, id).run();
-					await security.logAudit(userPayload.id, 'MODERATION_DELETE_POST', 'post', String(id), {}, request);
-				} else {
-					const now = Math.floor(Date.now() / 1000);
-					await db.prepare(`
-						WITH RECURSIVE comment_tree(id, depth) AS (
-							SELECT id, 0 FROM comments WHERE id = ?
-							UNION ALL
-							SELECT c.id, comment_tree.depth + 1
-							FROM comments c
-							JOIN comment_tree ON c.parent_id = comment_tree.id
-						)
-						UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
-					`).bind(id, now, userPayload.id).run();
-					await security.logAudit(userPayload.id, 'MODERATION_DELETE_COMMENT', 'comment', String(id), {}, request);
-				}
-				invalidatePublicContent(`moderation:${type}:delete`);
-				return jsonResponse({ success: true });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/comments/bulk-delete
-		if (url.pathname === '/api/admin/comments/bulk-delete' && method === 'POST') {
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-
-				const body = await request.json() as { ids?: unknown };
-				const ids = Array.isArray(body.ids)
-					? Array.from(new Set(body.ids.map(Number).filter((id) => Number.isInteger(id) && id > 0))).slice(0, 500)
-					: [];
-				if (!ids.length) return jsonResponse({ error: 'Missing comment ids' }, 400);
-
-				let deleted = 0;
-				for (const rootId of ids) {
-					const now = Math.floor(Date.now() / 1000);
-					const result = await db.prepare(`
-						WITH RECURSIVE comment_tree(id, depth) AS (
-							SELECT id, 0 FROM comments WHERE id = ?
-							UNION ALL
-							SELECT c.id, comment_tree.depth + 1
-							FROM comments c
-							JOIN comment_tree ON c.parent_id = comment_tree.id
-						)
-						UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
-					`).bind(rootId, now, userPayload.id).run();
-					deleted += Number((result.meta as any)?.changes || 0);
-				}
-				await security.logAudit(userPayload.id, 'ADMIN_BULK_DELETE_COMMENTS', 'comment', ids.join(','), { deleted }, request);
-				if (deleted) invalidatePublicContent('admin:comments:bulk-delete');
-				return jsonResponse({ success: true, deleted });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// DELETE /api/admin/comments/:id
-		if (url.pathname.match(/^\/api\/admin\/comments\/\d+$/) && method === 'DELETE') {
-			const id = url.pathname.split('/').pop();
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-
-				const now = Math.floor(Date.now() / 1000);
-				await db.prepare(`
-					WITH RECURSIVE comment_tree(id, depth) AS (
-						SELECT id, 0 FROM comments WHERE id = ?
-						UNION ALL
-						SELECT c.id, comment_tree.depth + 1
-						FROM comments c
-						JOIN comment_tree ON c.parent_id = comment_tree.id
-					)
-					UPDATE comments SET deleted_at = ?, deleted_by = ? WHERE id IN (SELECT id FROM comment_tree) AND COALESCE(deleted_at, 0) = 0
-				`).bind(id, now, userPayload.id).run();
-				
-				await security.logAudit(userPayload.id, 'ADMIN_DELETE_COMMENT', 'comment', String(id), {}, request);
-				invalidatePublicContent('admin:comment:delete');
-				return jsonResponse({ success: true });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/posts/:id/pin
-		if (url.pathname.match(/^\/api\/admin\/posts\/\d+\/pin$/) && method === 'POST') {
-			const id = url.pathname.split('/')[4];
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-
-				const body = await request.json() as any;
-				const { pinned } = body;
-				await db.prepare('UPDATE posts SET is_pinned = ? WHERE id = ?').bind(pinned ? 1 : 0, id).run();
-				
-				await security.logAudit(userPayload.id, 'ADMIN_PIN_POST', 'post', id, { pinned }, request);
-				invalidatePublicContent('admin:post:pin');
-				return jsonResponse({ success: true });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/posts/:id/category-pin
-		if (url.pathname.match(/^\/api\/admin\/posts\/\d+\/category-pin$/) && method === 'POST') {
-			const id = url.pathname.split('/')[4];
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-
-				const body = await request.json() as any;
-				const { pinned } = body;
-				await db.prepare('UPDATE posts SET is_category_pinned = ? WHERE id = ?').bind(pinned ? 1 : 0, id).run();
-				
-				await security.logAudit(userPayload.id, 'ADMIN_CATEGORY_PIN_POST', 'post', id, { pinned }, request);
-				invalidatePublicContent('admin:post:category-pin');
-				return jsonResponse({ success: true });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/posts/:id/move
-		if (url.pathname.match(/^\/api\/admin\/posts\/\d+\/move$/) && method === 'POST') {
-			const id = url.pathname.split('/')[4];
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-
-				const body = await request.json() as any;
-				const { category_id } = body;
-				
-				// Validate category exists if provided
-				if (category_id) {
-					const category = await db.prepare('SELECT id FROM categories WHERE id = ?').bind(category_id).first();
-					if (!category) return jsonResponse({ error: 'Category not found' }, 404);
-				}
-
-				await db.prepare('UPDATE posts SET category_id = ? WHERE id = ?').bind(category_id || null, id).run();
-				
-				await security.logAudit(userPayload.id, 'ADMIN_MOVE_POST', 'post', id, { category_id }, request);
-				invalidatePublicContent('admin:post:move');
-				return jsonResponse({ success: true });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// GET /api/admin/cleanup/analyze
-		if (url.pathname === '/api/admin/cleanup/analyze' && method === 'GET') {
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-                                
-				// 1. List all S3 objects
-				const allKeys = await listAllKeys(env as unknown as S3Env);
-				
-				// 2. Gather used URLs
-				const usedKeys = new Set<string>();
-
-				// Users avatars
-				const users = await db.prepare('SELECT avatar_url FROM users WHERE avatar_url IS NOT NULL').all();
-				for (const u of users.results) {
-					const uUrl = u.avatar_url as string;
-					const key = uUrl ? getKeyFromUrl(env as unknown as S3Env, uUrl) : null;
-					if (key) usedKeys.add(key);
-				}
-
-				// Posts images
-				const posts = await db.prepare('SELECT content FROM posts').all();
-				for (const p of posts.results) {
-					const urls = extractImageUrls(p.content as string);
-					for (const uUrl of urls) {
-						const key = uUrl ? getKeyFromUrl(env as unknown as S3Env, uUrl) : null;
-						if (key) usedKeys.add(key);
-					}
-				}
-
-				// 3. Find orphans
-				const orphans = allKeys.filter(key => !usedKeys.has(key));
-
-				return jsonResponse({ 
-					total_files: allKeys.length,
-					used_files: usedKeys.size,
-					orphaned_files: orphans.length,
-					orphans: orphans
-				});
-
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
-		// POST /api/admin/cleanup/execute
-		if (url.pathname === '/api/admin/cleanup/execute' && method === 'POST') {
-			try {
-				const userPayload = apiAdminUser || await authenticateAdmin(request, adminPermissionForApiPath(url.pathname));
-				
-				const body = await request.json() as any;
-				const { orphans } = body;
-				
-				if (!orphans || !Array.isArray(orphans)) return jsonResponse({ error: 'Invalid parameters' }, 400);
-
-				const deletePromises = orphans.map(key => deleteImage(env as unknown as S3Env, key));
-				
-				ctx.waitUntil(Promise.all(deletePromises).catch(err => console.error('Cleanup failed', err)));
-				
-				return jsonResponse({ success: true, message: `Deletion of ${orphans.length} files started` });
-			} catch (e) {
-				return handleError(e);
-			}
-		}
-
+		// --- ADMIN ROUTES (content API) — see api/admin-content-routes.ts ---
+		const adminContentResp = await handleAdminContentApi({
+			db, env, url, method, request, executionCtx: ctx, security, apiAdminUser,
+			jsonResponse, handleError, authenticateAdmin,
+			createNotification, awardUserProgress, notifyBadgeChange,
+			ensureBadgeDefinitionDescription, invalidatePublicContent, runtimeEnvForLinks,
+		});
+		if (adminContentResp) return adminContentResp;
 		// --- END ADMIN ROUTES ---
 
 		// TEST: Email Debug

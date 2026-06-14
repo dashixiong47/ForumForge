@@ -16,6 +16,7 @@ import {
 	renderSettingsPageSite,
 	siteHtmlResponse,
 	type SiteBrand,
+
 	type SiteCategory,
 	type SiteLanguage,
 	type SitePost,
@@ -140,7 +141,8 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 				if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
 				const oauthCount = await db.prepare('SELECT COUNT(*) AS count FROM oauth_accounts WHERE user_id = ?').bind(user.id).first<DBCount>().catch(() => ({ count: 0 }) as DBCount);
 				user.oauth_count = Number(oauthCount?.count || 0);
-				return siteHtmlResponse(renderSettingsPageSite({ user, categories, brand, levelSettings: await getLevelSettings() }));
+				const levelSettings = await getLevelSettings();
+				return siteHtmlResponse(renderSettingsPageSite({ user, categories, brand, levelSettings }));
 			}
 
 			if (url.pathname === '/me') {

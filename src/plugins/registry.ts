@@ -5,11 +5,27 @@ export type PluginConfigField = {
 	key: string;
 	type: string;
 	label: string;
+	labelKey?: string;
 	description: string;
+	descriptionKey?: string;
 	placeholder: string;
+	placeholderKey?: string;
 	required: boolean;
 	defaultValue: any;
 	options: Array<{ label: string; value: string }>;
+	arrayItemFields?: Array<{ key: string; label: string; labelKey?: string; placeholder: string; placeholderKey?: string; type: string }>;
+	badgeDefinitions?: {
+		keyPrefix?: string;
+		keyField?: string;
+		labelField?: string;
+		descriptionField?: string;
+		iconField?: string;
+		colorField?: string;
+		defaultIcon?: string;
+		defaultColor?: string;
+		defaultDescription?: string;
+		labelSuffix?: string;
+	};
 };
 
 export const BUILTIN_PLUGINS = [
@@ -46,7 +62,7 @@ export const BUILTIN_PLUGINS = [
 			'gallery.open': { 'zh-CN': '打开图片', 'en-US': 'Open image' },
 			'gallery.close': { 'zh-CN': '关闭预览', 'en-US': 'Close preview' }
 		}
-	}
+	},
 ];
 
 const PLUGIN_TYPES = new Set(['system', 'theme', 'widget', 'integration']);
@@ -106,6 +122,25 @@ function normalizeConfigOptions(options: unknown): Array<{ label: string; value:
 	}).filter(Boolean) as Array<{ label: string; value: string }>;
 }
 
+function normalizeConfigArrayItemFields(fields: unknown): Array<{ key: string; label: string; labelKey?: string; placeholder: string; placeholderKey?: string; type: string }> {
+	if (!Array.isArray(fields)) return [];
+	return fields.map((field) => {
+		const raw = field && typeof field === 'object' ? field as Record<string, any> : {};
+		const key = String(raw.key ?? raw.name ?? '').trim();
+		if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) return null;
+		const typeRaw = String(raw.type || 'text').trim().toLowerCase();
+		const type = ['text', 'textarea', 'password', 'number', 'boolean', 'select', 'url', 'email', 'json', 'media'].includes(typeRaw) ? typeRaw : 'text';
+		return {
+			key,
+			type,
+			label: String(raw.label ?? raw.title ?? key).trim() || key,
+			labelKey: String(raw.labelKey ?? raw.label_key ?? '').trim() || undefined,
+			placeholder: String(raw.placeholder ?? '').trim(),
+			placeholderKey: String(raw.placeholderKey ?? raw.placeholder_key ?? '').trim() || undefined,
+		};
+	}).filter(Boolean) as Array<{ key: string; label: string; labelKey?: string; placeholder: string; placeholderKey?: string; type: string }>;
+}
+
 export function normalizePluginConfigSchema(schema: unknown): { fields: PluginConfigField[] } {
 	const raw = typeof schema === 'string'
 		? (() => { try { return JSON.parse(schema); } catch { return {}; } })()
@@ -119,17 +154,36 @@ export function normalizePluginConfigSchema(schema: unknown): { fields: PluginCo
 		const key = String(field?.key ?? field?.name ?? '').trim();
 		if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) return null;
 		const typeRaw = String(field?.type || 'text').trim().toLowerCase();
-		const type = ['text', 'textarea', 'password', 'number', 'boolean', 'select', 'url', 'email'].includes(typeRaw) ? typeRaw : 'text';
+		const type = ['text', 'textarea', 'password', 'number', 'boolean', 'select', 'url', 'email', 'json', 'media'].includes(typeRaw) ? typeRaw : 'text';
 		const label = String(field?.label ?? field?.title ?? key).trim() || key;
+		const badgeRaw = field?.badgeDefinitions && typeof field.badgeDefinitions === 'object' ? field.badgeDefinitions : null;
 		return {
 			key,
 			type,
 			label,
+			labelKey: String(field?.labelKey ?? field?.label_key ?? '').trim() || undefined,
 			description: String(field?.description ?? field?.help ?? '').trim(),
+			descriptionKey: String(field?.descriptionKey ?? field?.description_key ?? field?.helpKey ?? field?.help_key ?? '').trim() || undefined,
 			placeholder: String(field?.placeholder ?? '').trim(),
+			placeholderKey: String(field?.placeholderKey ?? field?.placeholder_key ?? '').trim() || undefined,
 			required: Boolean(field?.required),
 			defaultValue: field?.default ?? field?.defaultValue ?? '',
 			options: normalizeConfigOptions(field?.options),
+			arrayItemFields: normalizeConfigArrayItemFields(field?.arrayItemFields),
+			...(badgeRaw ? {
+				badgeDefinitions: {
+					keyPrefix: String(badgeRaw.keyPrefix ?? '').trim(),
+					keyField: String(badgeRaw.keyField ?? 'key').trim() || 'key',
+					labelField: String(badgeRaw.labelField ?? 'name').trim() || 'name',
+					descriptionField: String(badgeRaw.descriptionField ?? 'description').trim(),
+					iconField: String(badgeRaw.iconField ?? 'icon').trim(),
+					colorField: String(badgeRaw.colorField ?? 'color').trim(),
+					defaultIcon: String(badgeRaw.defaultIcon ?? '').trim(),
+					defaultColor: String(badgeRaw.defaultColor ?? '').trim(),
+					defaultDescription: String(badgeRaw.defaultDescription ?? '').trim(),
+					labelSuffix: String(badgeRaw.labelSuffix ?? '').trim(),
+				}
+			} : {}),
 		};
 	}).filter(Boolean) as PluginConfigField[];
 	return { fields };
@@ -153,6 +207,19 @@ export function validatePluginConfig(schema: unknown, config: unknown, options: 
 				if (!Number.isFinite(n)) return { ok: false, error: `${field.label} must be a number`, field: field.key };
 				value = n;
 			}
+		} else if (field.type === 'json') {
+			if (typeof value === 'string') {
+				if (!value.trim()) {
+					value = field.defaultValue ?? null;
+				} else {
+					try {
+						value = JSON.parse(value);
+					} catch {
+						return { ok: false, error: `${field.label} must be valid JSON`, field: field.key };
+					}
+				}
+			}
+			if (value === undefined) value = null;
 		} else {
 			value = String(value ?? '').trim();
 		}

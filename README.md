@@ -47,8 +47,9 @@ It runs as **one Cloudflare Worker** with SSR pages, D1 storage, R2 media upload
 | 🛂 Moderation | Pending queues, batch actions, reject-reason dialog, resubmission flow. |
 | 👥 Roles & permissions | Admin-only backend, role cards, permission matrix, user role assignment. |
 | 🏆 Levels | Points, XP, check-in, post/reply/replied rewards, configurable level rules. |
+| 🎖️ Badges | Plugin-granted image badges, badge definitions, per-user badge editing, enable/disable and revoke flows. |
 | 🌐 i18n | English and Simplified Chinese included, editable translation keys, localized content fields. |
-| 🧩 Plugins | Manifest editor, CSS/HTML/Head HTML/JS/i18n/config/permissions, import and share. |
+| 🧩 Plugins | Manifest editor, plugin config schema, client UI hooks, server capability APIs, import and share. |
 | 📊 Dashboard | Visit analytics, world map, 7-day trends, device split, recent activity. |
 
 ---
@@ -247,11 +248,21 @@ You can:
 
 - 📦 Install a plugin from JSON
 - 🌐 Install from a URL
-- ✍️ Edit manifest, CSS, HTML, Head HTML, JavaScript, config, permissions, and i18n
+- ✍️ Edit manifest, CSS, HTML, Head HTML, JavaScript, config schema, permissions, and i18n
 - 🔁 Enable, disable, update, delete, and share plugins
 - 🌍 Ship plugin-owned translations with the manifest
+- 🧰 Use exposed admin UI helpers instead of hard-coding project internals
+- 🎖️ Grant, revoke, and define badges through plugin capability APIs
 
-Minimal manifest:
+Recommended plugin flow:
+
+1. Create a manifest with `id`, `name`, `version`, `description`, optional assets, config schema, permissions, tags, and plugin-owned i18n keys.
+2. Define editable config through `configSchema`; config values are stored by the platform and can be injected into server-side plugin capability calls without exposing secrets to browser code.
+3. Use plugin JavaScript only through exposed platform interfaces such as `window.ForumForgePluginUI` and `/api/plugin/:pluginId/capability/*`.
+4. For admin integrations, register UI surfaces from plugin code instead of writing project-specific hard-coded tabs or routes.
+5. For user-visible state such as badges, call the capability API so data stays owned by the plugin ecosystem and remains filterable when the plugin is disabled.
+
+Minimal manifest shape:
 
 ```json
 {
@@ -273,6 +284,56 @@ Minimal manifest:
 }
 ```
 
+### Plugin UI Interfaces
+
+Admin pages expose `window.ForumForgePluginUI` for plugin-owned UI:
+
+| API | Purpose |
+| --- | --- |
+| `t(key, fallback)` | Read current admin translation text. |
+| `getLocale()` | Get the active locale. |
+| `showToast(message, type)` | Show admin success/error feedback. |
+| `runButton(button, label, task)` | Run async button work with disabled/loading state. |
+| `openModal(id)` / `closeModal(id)` | Use platform modal behavior. |
+| `openMediaPicker(options)` | Open the shared media picker and resolve the selected media item. |
+| `bindMediaInput(input, options)` | Bind a media picker result into an input value. |
+| `registerBadgeTab(id, label, init)` | Add a plugin-owned tab to Badge Management. |
+
+The shared media picker supports system media upload and existing media selection. Plugins should use it for image/file selection instead of building their own file browser.
+
+### Plugin Capability APIs
+
+Enabled plugins can call server-side capability endpoints under:
+
+```text
+/api/plugin/:pluginId/capability
+```
+
+Available capabilities:
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/me` | `GET` | Return the current authenticated user summary. |
+| `/fetch` | `POST` | Server-side HTTP fetch with SSRF protections and optional config-secret injection. |
+| `/db` | `POST` | Plugin key-value storage and badge operations. |
+
+`/capability/db` supports:
+
+| Operation | Purpose |
+| --- | --- |
+| `get` / `set` / `delete` / `list` | Read and write plugin-owned records in `plugin_store`. |
+| `grant_badge` | Grant a badge to a user and create the reusable badge definition when needed. |
+| `revoke_badge` | Revoke a user badge and notify the user. |
+
+Storage scopes:
+
+| Scope | Meaning |
+| --- | --- |
+| `user` | Data belongs to the current user. |
+| `shared` | Global plugin data. Shared writes require admin permission. |
+
+Badge definitions and user badges are filtered with plugin enabled state. Disabling a plugin hides its badge surface and related user-visible badges without deleting historical data.
+
 ---
 
 ## 🏗️ Architecture
@@ -283,8 +344,8 @@ Browser
   ▼
 Cloudflare Worker
   ├─ SSR pages: forum, auth, profile, admin
-  ├─ API routes: posts, comments, media, moderation, settings, plugins
-  ├─ D1: users, posts, settings, i18n, plugins, analytics
+  ├─ API routes: posts, comments, media, moderation, settings, plugins, plugin capabilities
+  ├─ D1: users, posts, settings, i18n, plugins, plugin store, badges, analytics
   ├─ R2: uploaded images and videos
   ├─ Email: Cloudflare Email / Resend / MailChannels / SMTP
   └─ OAuth: Google / GitHub / Epic
@@ -347,6 +408,10 @@ Design rules:
 | `media_assets` | System and post media metadata. |
 | `languages` / `translations` | Editable multilingual UI text. |
 | `plugins` | Plugin manifest, runtime code, config, i18n. |
+| `plugin_store` | Plugin-owned scoped key-value data. |
+| `plugin_resources` | Plugin-owned resource payloads and resource metadata. |
+| `badge_definitions` | Reusable badge definitions created by plugins or admin edits. |
+| `user_badges` | Granted user badges, per-user enable state, revoke history surface. |
 | `settings` | Site settings, email, OAuth, moderation, rewards. |
 | `role_permissions` | Role permission matrix. |
 | `notifications` | User notifications. |

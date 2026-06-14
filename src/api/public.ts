@@ -86,6 +86,14 @@ export async function handlePublicApi(ctx: ApiContext): Promise<Response | null>
 				? requested
 				: (languageCodes.has(FALLBACK_LOCALE) ? FALLBACK_LOCALE : String((languages[0] as any)?.code || FALLBACK_LOCALE));
 			const messages = await getSystemTranslations(locale);
+			const roleRows = await db.prepare("SELECT scope, value FROM translations WHERE key = 'name' AND locale = ? AND scope LIKE 'role:%'")
+				.bind(locale)
+				.all<{ scope: string; value: string }>()
+				.catch(() => ({ results: [] as Array<{ scope: string; value: string }> }));
+			for (const row of roleRows.results || []) {
+				const roleKey = String(row.scope || '').replace(/^role:/, '').trim().toLowerCase();
+				if (roleKey) messages[`role.${roleKey}`] = String(row.value || roleKey);
+			}
 			return jsonResponse({ locale, languages, messages });
 		} catch (e) {
 			return handleError(e);

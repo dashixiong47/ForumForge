@@ -47,8 +47,9 @@ ForumForge 是一个轻量、可部署、可扩展的论坛系统，适合个人
 | 🛂 审核流程 | 待审队列、批量操作、拒绝理由弹窗、重新编辑提交。 |
 | 👥 角色权限 | 仅管理员可进后台，角色卡片、权限矩阵、用户角色分配。 |
 | 🏆 等级系统 | 积分、经验、签到、发帖、回复、被回复奖励，可在后台配置。 |
+| 🎖️ 勋章系统 | 插件发放图片勋章、勋章定义、用户勋章编辑、启用/禁用和撤销流程。 |
 | 🌐 多语言 | 内置英文和简体中文，支持编辑翻译 Key，分类/标签/站点文案可本地化。 |
-| 🧩 插件系统 | Manifest、CSS、HTML、Head HTML、JavaScript、i18n、配置和权限管理。 |
+| 🧩 插件系统 | Manifest 编辑、配置 Schema、客户端 UI Hooks、服务端能力接口、导入和分享。 |
 | 📊 仪表盘 | 访问统计、世界地图、7 天趋势、设备分布、最近访问记录。 |
 
 ---
@@ -247,11 +248,21 @@ https://dsxforge.com/oauth/google/callback
 
 - 📦 通过 JSON 安装插件
 - 🌐 通过 URL 安装插件
-- ✍️ 编辑 Manifest、CSS、HTML、Head HTML、JavaScript、配置、权限和 i18n
+- ✍️ 编辑 Manifest、CSS、HTML、Head HTML、JavaScript、配置 Schema、权限和 i18n
 - 🔁 启用、停用、更新、删除和分享插件
 - 🌍 让插件自带自己的多语言文案
+- 🧰 使用平台开放的后台 UI 辅助接口，而不是硬编码项目内部实现
+- 🎖️ 通过插件能力接口发放、撤销和定义勋章
 
-最小 Manifest：
+推荐插件流程：
+
+1. 创建 Manifest，包含 `id`、`name`、`version`、`description`，以及可选资源、配置 Schema、权限、标签和插件自己的 i18n key。
+2. 通过 `configSchema` 定义可编辑配置；配置值由平台保存，并可在服务端插件能力调用中注入，避免把敏感值暴露给浏览器代码。
+3. 插件 JavaScript 只通过平台开放接口调用能力，例如 `window.ForumForgePluginUI` 和 `/api/plugin/:pluginId/capability/*`。
+4. 后台扩展通过插件代码注册 UI 区域，不直接写项目内硬编码 Tab 或路由。
+5. 用户可见状态，例如勋章，必须走插件能力接口写入，这样插件停用时可以统一过滤显示，同时保留历史数据。
+
+最小 Manifest 结构：
 
 ```json
 {
@@ -273,6 +284,56 @@ https://dsxforge.com/oauth/google/callback
 }
 ```
 
+### 插件 UI 接口
+
+后台页面会向插件暴露 `window.ForumForgePluginUI`：
+
+| API | 用途 |
+| --- | --- |
+| `t(key, fallback)` | 读取当前后台语言下的翻译文本。 |
+| `getLocale()` | 获取当前语言。 |
+| `showToast(message, type)` | 显示后台成功/错误提示。 |
+| `runButton(button, label, task)` | 执行异步按钮操作，并自动处理禁用和加载状态。 |
+| `openModal(id)` / `closeModal(id)` | 使用平台统一弹窗行为。 |
+| `openMediaPicker(options)` | 打开共享媒体选择器并返回选中的媒体。 |
+| `bindMediaInput(input, options)` | 将媒体选择结果写入指定 input。 |
+| `registerBadgeTab(id, label, init)` | 向勋章管理注册插件自己的 Tab。 |
+
+共享媒体选择器支持系统媒体上传和已有媒体选择。插件需要选择图片或文件时，应使用该接口，不要自己实现文件浏览器。
+
+### 插件能力接口
+
+启用状态的插件可以调用服务端能力接口：
+
+```text
+/api/plugin/:pluginId/capability
+```
+
+可用能力：
+
+| Endpoint | Method | 用途 |
+| --- | --- | --- |
+| `/me` | `GET` | 返回当前登录用户概要。 |
+| `/fetch` | `POST` | 服务端 HTTP 请求，带 SSRF 防护，并支持注入插件配置中的密钥。 |
+| `/db` | `POST` | 插件键值存储和勋章操作。 |
+
+`/capability/db` 支持：
+
+| Operation | 用途 |
+| --- | --- |
+| `get` / `set` / `delete` / `list` | 读写插件自己的 `plugin_store` 数据。 |
+| `grant_badge` | 向用户发放勋章，并在需要时创建可复用勋章定义。 |
+| `revoke_badge` | 撤销用户勋章并通知用户。 |
+
+存储作用域：
+
+| Scope | 含义 |
+| --- | --- |
+| `user` | 数据属于当前用户。 |
+| `shared` | 插件全局共享数据。写入共享数据需要管理员权限。 |
+
+勋章定义和用户勋章会跟随插件启用状态过滤。停用插件会隐藏对应后台扩展和前台可见勋章，但不会删除历史数据。
+
 ---
 
 ## 🏗️ 架构
@@ -283,8 +344,8 @@ Browser
   ▼
 Cloudflare Worker
   ├─ SSR pages: forum, auth, profile, admin
-  ├─ API routes: posts, comments, media, moderation, settings, plugins
-  ├─ D1: users, posts, settings, i18n, plugins, analytics
+  ├─ API routes: posts, comments, media, moderation, settings, plugins, plugin capabilities
+  ├─ D1: users, posts, settings, i18n, plugins, plugin store, badges, analytics
   ├─ R2: uploaded images and videos
   ├─ Email: Cloudflare Email / Resend / MailChannels / SMTP
   └─ OAuth: Google / GitHub / Epic
@@ -347,6 +408,10 @@ Cloudflare Worker
 | `media_assets` | 系统媒体和帖子媒体元数据。 |
 | `languages` / `translations` | 可编辑的多语言 UI 文案。 |
 | `plugins` | 插件 Manifest、运行时代码、配置和 i18n。 |
+| `plugin_store` | 插件自己的分作用域键值数据。 |
+| `plugin_resources` | 插件资源内容和资源元数据。 |
+| `badge_definitions` | 由插件创建或后台编辑的可复用勋章定义。 |
+| `user_badges` | 已发放用户勋章、用户级启用状态和撤销管理数据。 |
 | `settings` | 站点设置、邮件、OAuth、审核、奖励配置。 |
 | `role_permissions` | 角色权限矩阵。 |
 | `notifications` | 用户消息通知。 |
