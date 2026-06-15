@@ -10,7 +10,7 @@ import { CATEGORY_ICONS } from '../assets/category-icons';
 import { KV_BOOTSTRAP_KEY, KV_BOOTSTRAP_TTL } from '../core/kv';
 import { seedDemoContent } from "./seed-demo";
 
-const BOOTSTRAP_VERSION = '2026-06-15.2';
+const BOOTSTRAP_VERSION = '2026-06-15.3';
 
 let bootstrapPromise: Promise<void> | null = null;
 let bootstrapReady = false;
@@ -146,6 +146,7 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
 					{ name: 'deleted_at', stmt: 'ALTER TABLE posts ADD COLUMN deleted_at INTEGER DEFAULT 0' },
 					{ name: 'deleted_by', stmt: 'ALTER TABLE posts ADD COLUMN deleted_by INTEGER DEFAULT 0' },
 					{ name: 'created_at', stmt: 'ALTER TABLE posts ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' },
+					{ name: 'published_at', stmt: 'ALTER TABLE posts ADD COLUMN published_at TIMESTAMP' },
 				].filter((item) => postColumns.size && !postColumns.has(item.name)).map((item) => item.stmt),
 				...[{ name: 'status', stmt: "ALTER TABLE comments ADD COLUMN status TEXT DEFAULT 'approved'" }]
 					.filter((item) => commentColumns.size && !commentColumns.has(item.name)).map((item) => item.stmt),
@@ -647,6 +648,7 @@ async function runBootstrap(env: Env, db: D1Database): Promise<void> {		const en
   deleted_at INTEGER DEFAULT 0,
   deleted_by INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  published_at TIMESTAMP,
   FOREIGN KEY (author_id) REFERENCES users(id),
   FOREIGN KEY (category_id) REFERENCES categories(id)
 );`,

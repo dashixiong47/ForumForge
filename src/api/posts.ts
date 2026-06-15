@@ -294,14 +294,14 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 				sortByRaw === 'likes'
 					? `like_count ${sortDir}`
 					: sortByRaw === 'comments'
-						? `comment_count ${sortDir}`
-						: sortByRaw === 'views'
-							? `posts.view_count ${sortDir}`
-							: `posts.created_at ${sortDir}`;
+							? `comment_count ${sortDir}`
+							: sortByRaw === 'views'
+								? `posts.view_count ${sortDir}`
+								: `COALESCE(posts.published_at, posts.created_at) ${sortDir}`;
 			const pinSortExpr = categoryId && categoryId !== 'uncategorized'
 				? 'is_pinned DESC, COALESCE(is_category_pinned, 0) DESC'
 				: 'is_pinned DESC';
-			query += ` ORDER BY ${pinSortExpr}, ${sortExpr}, posts.created_at DESC LIMIT ? OFFSET ?`;
+			query += ` ORDER BY ${pinSortExpr}, ${sortExpr}, COALESCE(posts.published_at, posts.created_at) DESC, posts.created_at DESC LIMIT ? OFFSET ?`;
 			params.push(limit, offset);
 
 			const [postsResult, countResult] = await Promise.all([
@@ -382,6 +382,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const { category_id } = body;
 			const saveDraft = wantsDraft(body);
 			if (!saveDraft) ensureCanPublishContent(userPayload);
+			if (!saveDraft && !category_id) return jsonResponse({ error: 'Category is required' }, 400);
 			const normalized = normalizePostInput(body, saveDraft);
 			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
 			const title = normalized.title;
@@ -408,7 +409,8 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			}
 			if (!(await validateTagIds(tagIds))) return jsonResponse({ error: 'Tag not found' }, 400);
 
-			let nextStatus = String(post.status || 'approved');
+			const previousStatus = String(post.status || 'approved');
+			let nextStatus = previousStatus;
 			let nextRejectReason = String(post.rejection_reason || '');
 			if (saveDraft) {
 				nextStatus = 'draft';
@@ -417,10 +419,11 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 				nextStatus = await resolvePublishedStatus(userPayload, isAdminEdit);
 				nextRejectReason = '';
 			}
+			const firstPublish = previousStatus === 'draft' && nextStatus !== 'draft';
 			content = await persistPostPluginResources(postId, body, userPayload, content);
 			await db.prepare(
-				'UPDATE posts SET title = ?, content = ?, category_id = ?, min_view_level = ?, min_comment_level = ?, status = ?, rejection_reason = ? WHERE id = ?'
-			).bind(title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, nextStatus, nextStatus === 'rejected' ? nextRejectReason : '', postId).run();
+				'UPDATE posts SET title = ?, content = ?, category_id = ?, min_view_level = ?, min_comment_level = ?, status = ?, rejection_reason = ?, published_at = CASE WHEN ? = 1 AND published_at IS NULL THEN CURRENT_TIMESTAMP ELSE published_at END WHERE id = ?'
+			).bind(title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, nextStatus, nextStatus === 'rejected' ? nextRejectReason : '', firstPublish ? 1 : 0, postId).run();
 			await syncPostTranslations(postId, body, title, content, i18nEnabled);
 			await syncPostTags(postId, tagIds);
 			if (!isAdminEdit && nextStatus === 'pending') await createNotification(userPayload.id, 'post_resubmitted', '帖子已重新提交', '你的帖子修改后已重新提交审核。', { postId });
@@ -450,12 +453,13 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			if ('error' in normalized) return jsonResponse({ error: normalized.error }, 400);
 			const textError = await validatePostText(normalized.title, normalized.content);
 			if (textError) return jsonResponse({ error: textError }, 400);
+			if (!post.category_id) return jsonResponse({ error: 'Category is required' }, 400);
 			if (post.category_id) {
 				const category = await db.prepare('SELECT id FROM categories WHERE id = ? AND COALESCE(enabled, 1) = 1 AND (? = 1 OR COALESCE(admin_only, 0) = 0)').bind(post.category_id, isAdminEdit ? 1 : 0).first();
 				if (!category) return jsonResponse({ error: 'Category not found' }, 400);
 			}
 			const nextStatus = await resolvePublishedStatus(userPayload, isAdminEdit);
-			await db.prepare("UPDATE posts SET status = ?, rejection_reason = '' WHERE id = ?").bind(nextStatus, postId).run();
+			await db.prepare("UPDATE posts SET status = ?, rejection_reason = '', published_at = CASE WHEN published_at IS NULL THEN CURRENT_TIMESTAMP ELSE published_at END WHERE id = ?").bind(nextStatus, postId).run();
 			if (String(post.status || '') !== 'approved' && nextStatus === 'approved') await awardUserProgress(Number(post.author_id), 'create_post', { postId });
 			if (nextStatus === 'pending') await createNotification(Number(post.author_id), 'post_pending', '帖子等待审核', '你的草稿已提交，管理员审核后会发布。', { postId });
 			await security.logAudit(userPayload.id, 'PUBLISH_POST', 'post', postId, { status: nextStatus }, request);
@@ -547,7 +551,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 				 FROM comments
 				 JOIN users ON comments.author_id = users.id
 				 WHERE post_id = ? AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0
-				 ORDER BY created_at ASC`
+				 ORDER BY comments.created_at DESC, comments.id DESC`
 			).bind(postId).all();
 			return jsonResponse(results);
 		} catch (e) {
@@ -617,6 +621,7 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 			const { category_id } = body;
 			const saveDraft = wantsDraft(body);
 			if (!saveDraft) ensureCanPublishContent(userPayload);
+			if (!saveDraft && !category_id) return jsonResponse({ error: 'Category is required' }, 400);
 			const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
 			if (!saveDraft && !(await checkTurnstile(body, ip))) return jsonResponse({ error: 'Turnstile verification failed' }, 403);
 			const normalized = normalizePostInput(body, saveDraft);
@@ -640,8 +645,8 @@ export async function handlePostsApi(ctx: PostsApiContext): Promise<Response | n
 
 			const postStatus = saveDraft ? 'draft' : await resolvePublishedStatus(userPayload);
 			const { success, meta } = await db.prepare(
-				'INSERT INTO posts (author_id, title, content, category_id, min_view_level, min_comment_level, status) VALUES (?, ?, ?, ?, ?, ?, ?)'
-			).bind(userPayload.id, title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, postStatus).run();
+				'INSERT INTO posts (author_id, title, content, category_id, min_view_level, min_comment_level, status, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END)'
+			).bind(userPayload.id, title.trim(), content.trim(), category_id || null, minViewLevel, minCommentLevel, postStatus, postStatus === 'draft' ? 0 : 1).run();
 			const newPostId = meta?.last_row_id;
 			if (success && newPostId) {
 				try {

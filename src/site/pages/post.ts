@@ -42,12 +42,11 @@ export function renderPostPage(options: {
 		videoEmbedDomains: options.videoEmbedDomains,
 		body: `<div class="detail-grid">
 			<article class="detail-panel">
-				<header class="detail-head"><div>${profileAvatar({ id: post.author_id, author_id: post.author_id, avatar_url: post.author_avatar, username: post.author_name, role: post.author_role, points: post.author_points, experience: post.author_experience, level: post.author_level }, post.author_name || 'U', options.env)}</div><div><h1>${escapeHtml(post.title)}</h1><div class="meta"><strong>${escapeHtml(post.author_name || 'User')}</strong><span>·</span><span>${post.category_name ? escapeHtml(post.category_name) : i18nText('post.uncategorized', '未分类')}</span><span>·</span><span>${escapeHtml(dateText(post.created_at))}</span>${postTags(post)}</div></div><div class="detail-actions">${likeButton(post)}<span class="btn stat stat-view">${statIcon('view')}<span>${Number(post.view_count || 0)}</span></span>${postManageActions(options.user, post, '/', options.env)}</div></header>
+				<header class="detail-head"><div>${profileAvatar({ id: post.author_id, author_id: post.author_id, avatar_url: post.author_avatar, username: post.author_name, role: post.author_role, points: post.author_points, experience: post.author_experience, level: post.author_level }, post.author_name || 'U', options.env)}</div><div><h1>${escapeHtml(post.title)}</h1><div class="meta"><strong>${escapeHtml(post.author_name || 'User')}</strong><span>·</span><span>${post.category_name ? escapeHtml(post.category_name) : i18nText('post.uncategorized', '未分类')}</span><span>·</span><span>${escapeHtml(dateText(post.published_at || post.created_at))}</span>${postTags(post)}</div></div><div class="detail-actions">${likeButton(post)}<span class="btn stat stat-view">${statIcon('view')}<span>${Number(post.view_count || 0)}</span></span>${postManageActions(options.user, post, '/', options.env)}</div></header>
 				${articleBody}
 			</article>
 			<section class="detail-panel comments"><header class="detail-head"><h1 data-i18n="comment.title">评论</h1><span class="pill">${canView ? options.comments.length : 0} <span data-i18n="comment.countSuffix">条</span></span></header>${canView ? form : ''}<div class="comment-list">${commentsBody || '<div class="muted" data-i18n="comment.empty">暂无评论</div>'}</div></section>
 		</div>`,
 	});
 }
-
 

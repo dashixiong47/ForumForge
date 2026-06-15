@@ -462,7 +462,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 				const fallbackLocale = locale === 'en-US' ? 'zh-CN' : 'en-US';
 				const [posts, categories, countRow] = await Promise.all([
 					db.prepare(
-					`SELECT p.id, COALESCE(pt.title, pf.title, p.title) AS title, p.content, p.created_at, p.view_count, p.is_pinned, p.is_category_pinned, p.category_id, p.author_id, p.status,
+					`SELECT p.id, COALESCE(pt.title, pf.title, p.title) AS title, p.content, p.created_at, p.published_at, p.view_count, p.is_pinned, p.is_category_pinned, p.category_id, p.author_id, p.status,
 					        u.username,
 					        COALESCE(ct.value, cf.value, c.name) AS category_name,
 					        COUNT(cm.id) AS comment_count
@@ -476,7 +476,7 @@ export async function renderAdminRoute(ctx: AdminRouteContext): Promise<Response
 					   LEFT JOIN comments cm ON cm.post_id = p.id AND COALESCE(cm.deleted_at, 0) = 0
 					  WHERE COALESCE(p.deleted_at, 0) = 0
 					  GROUP BY p.id
-					  ORDER BY p.created_at DESC
+					  ORDER BY COALESCE(p.published_at, p.created_at) DESC, p.created_at DESC
 					  LIMIT ? OFFSET ?`
 					).bind(locale, fallbackLocale, locale, fallbackLocale, pageSize, offset).all(),
 					db.prepare(

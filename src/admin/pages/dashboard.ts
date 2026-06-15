@@ -17,17 +17,7 @@ export function renderAdminDashboard(user: UserPayload, data: any): string {
 	const visits7Count = (analytics.visits_7d || []).reduce((sum: number, row: any) => sum + Number(row.visits || 0), 0);
 	const visitors7Count = (analytics.visits_7d || []).reduce((sum: number, row: any) => sum + Number(row.visitors || 0), 0);
 	const country7Count = (analytics.countries_7d || []).filter((row: any) => row.country && row.country !== 'XX').length;
-	const countryName = (code: string) => {
-		const names: Record<string, string> = {
-			US: 'United States', CN: 'China', HK: 'Hong Kong', TW: 'Taiwan', JP: 'Japan', KR: 'South Korea',
-			SG: 'Singapore', GB: 'United Kingdom', DE: 'Germany', FR: 'France', CA: 'Canada', AU: 'Australia',
-			IN: 'India', RU: 'Russia', BR: 'Brazil', NL: 'Netherlands', VN: 'Vietnam', TH: 'Thailand',
-			ID: 'Indonesia', MY: 'Malaysia', PH: 'Philippines', ES: 'Spain', IT: 'Italy', PL: 'Poland',
-			TR: 'Turkey', AE: 'United Arab Emirates', SA: 'Saudi Arabia', MX: 'Mexico', AR: 'Argentina',
-			ZA: 'South Africa'
-		};
-		return names[String(code || '').toUpperCase()] || String(code || 'Unknown').toUpperCase();
-	};
+	const countryName = (code: string) => String(code || 'Unknown').toUpperCase();
 	const countryCoord = (code: string): [number, number] => {
 		const coords: Record<string, [number, number]> = {
 			US: [-98, 38], CN: [104, 35], HK: [114, 22], TW: [121, 24], JP: [138, 37], KR: [128, 36],
@@ -46,8 +36,8 @@ export function renderAdminDashboard(user: UserPayload, data: any): string {
 		}),
 		visits7: analytics.visits_7d || [],
 		countries7: (analytics.countries_7d || []).map((row: any) => ({
-			name: countryName(row.country),
 			code: String(row.country || 'XX').toUpperCase(),
+			name: countryName(row.country),
 			value: Number(row.visits || 0),
 			coord: countryCoord(row.country),
 		})),
@@ -150,9 +140,21 @@ async function renderWorldMap(map,countryData,text,muted,green){
 			echarts.registerMap('world',await res.json());
 		}
 		var maxCountry=Math.max.apply(null,[1].concat(countryData.map(function(i){return i.value||0;})));
+		var regionNames=null,regionLocale=String(window.ADMIN_LOCALE||document.documentElement.lang||'zh-CN');
+		try{if(typeof Intl!=='undefined'&&Intl.DisplayNames)regionNames=new Intl.DisplayNames([regionLocale],{type:'region'});}catch(e){}
+		function displayCountry(d,p){
+			var code=String(d&&d.code||'').toUpperCase();
+			if(!/^[A-Z]{2}$/.test(code)||code==='XX')return p.name||d.name||code||'Unknown';
+			try{if(regionNames)return regionNames.of(code)||p.name||d.name||code;}catch(e){}
+			return p.name||d.name||code;
+		}
+		function visitValue(d){
+			if(Array.isArray(d&&d.value))return Number(d.value[2]||0);
+			return Number(d&&d.value||0);
+		}
 		map.setOption({
 			backgroundColor:'transparent',
-			tooltip:{trigger:'item',backgroundColor:'#0d141d',borderColor:'rgba(88,166,255,.35)',textStyle:{color:text},formatter:function(p){var d=p.data||{};return (d.code?d.code+' · ':'')+p.name+'<br/>'+Number(d.value||0)+' '+t('admin.dashboard.chartVisits','访问量');}},
+			tooltip:{trigger:'item',backgroundColor:'#0d141d',borderColor:'rgba(88,166,255,.35)',textStyle:{color:text},formatter:function(p){var d=p.data||{};return (d.code?d.code+' · ':'')+displayCountry(d,p)+'<br/>'+visitValue(d)+' '+t('admin.dashboard.chartVisits','访问量');}},
 			visualMap:{min:0,max:maxCountry,left:18,bottom:18,text:[t('admin.dashboard.mapHigh','高'),t('admin.dashboard.mapLow','低')],textStyle:{color:muted},inRange:{color:['#102033','#1f6feb','#3fb950']},calculable:true,itemWidth:12,itemHeight:96},
 			toolbox:{show:false,feature:{restore:{}}},
 			geo:{map:'world',roam:true,zoom:1.05,left:18,right:18,top:18,bottom:18,label:{show:false},emphasis:{label:{show:false},itemStyle:{areaColor:'#1f6feb'}},itemStyle:{areaColor:'#141f2d',borderColor:'rgba(120,145,175,.32)',borderWidth:.6}},
@@ -209,5 +211,3 @@ initDashboard();
 `
 	});
 }
-
-

@@ -394,7 +394,7 @@ export function postRow(post: SitePost, _featured = false, user?: SiteUser | nul
 	return `<article class="post-row ${hasMedia ? 'has-media' : 'no-media'}">
 		<div class="post-main">
 			<div class="compact-item-head"><a class="post-title" href="${postPath}">${postPinBadges(post)}<span>${escapeHtml(post.title)}</span></a>${postManageActions(user, post, '/', env)}</div>
-			<div class="meta">${profileAvatar(author, post.author_name || 'U', env)}<strong>${escapeHtml(post.author_name || 'User')}</strong><span>·</span><span>${post.category_name ? escapeHtml(post.category_name) : i18nText('post.uncategorized', '未分类')}</span><span>·</span><span>${escapeHtml(dateText(post.created_at))}</span><span>·</span><span>${readingMinutes(post.content)} <span data-i18n="post.minRead">分钟阅读</span></span>${postTags(post)}</div>
+			<div class="meta">${profileAvatar(author, post.author_name || 'U', env)}<strong>${escapeHtml(post.author_name || 'User')}</strong><span>·</span><span>${post.category_name ? escapeHtml(post.category_name) : i18nText('post.uncategorized', '未分类')}</span><span>·</span><span>${escapeHtml(dateText(post.published_at || post.created_at))}</span><span>·</span><span>${readingMinutes(post.content)} <span data-i18n="post.minRead">分钟阅读</span></span>${postTags(post)}</div>
 			${canView ? `<p class="post-excerpt">${escapeHtml(excerpt)}</p>` : `<p class="post-excerpt locked-excerpt"><span data-i18n="post.viewLevelLocked">查看等级不足</span> · <span data-i18n="post.needLevel">需要等级</span> ${minViewLevel}</p>`}
 			<div class="stats stats-start">${statNode('like', Number(post.like_count || 0), ` data-like-static="${post.id}"`, !!post.liked)}${statNode('comment', Number(post.comment_count || 0))}${statNode('view', Number(post.view_count || 0))}</div>
 		</div>
@@ -416,4 +416,3 @@ export function renderComments(comments: SiteComment[], parentId: number | null 
 		})
 		.join('');
 }
-

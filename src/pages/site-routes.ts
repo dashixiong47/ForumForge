@@ -168,7 +168,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 						 WHERE posts.author_id = ?
 						   AND COALESCE(posts.status, 'approved') <> 'draft'
 						   AND COALESCE(posts.deleted_at, 0) = 0
-						 ORDER BY posts.created_at DESC
+						 ORDER BY COALESCE(posts.published_at, posts.created_at) DESC, posts.created_at DESC
 						 LIMIT ? OFFSET ?`
 					).bind(...localizedPostParams(localizePosts), user.id, pageSize, (postsPage - 1) * pageSize).all(),
 					db.prepare("SELECT COUNT(*) AS count FROM posts WHERE author_id = ? AND COALESCE(status, 'approved') <> 'draft' AND COALESCE(deleted_at, 0) = 0").bind(user.id).first<DBCount>(),
@@ -316,7 +316,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 							   AND COALESCE(posts.status, 'approved') = 'approved'
 							   AND COALESCE(posts.deleted_at, 0) = 0
 							   AND (posts.category_id IS NULL OR (COALESCE(categories.enabled, 1) = 1 AND (? = 1 OR COALESCE(categories.admin_only, 0) = 0)))
-							 ORDER BY posts.created_at DESC
+							 ORDER BY COALESCE(posts.published_at, posts.created_at) DESC, posts.created_at DESC
 							 LIMIT ? OFFSET ?`
 						).bind(...localizedPostParams(localizeProfilePosts), profile.id, includeAdminOnlyProfilePosts ? 1 : 0, pageSize, (page - 1) * pageSize).all()
 						: Promise.resolve({ results: [] } as any),
@@ -427,7 +427,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					 FROM comments
 					 JOIN users ON comments.author_id = users.id
 						 WHERE post_id = ? AND COALESCE(comments.status, 'approved') = 'approved' AND COALESCE(comments.deleted_at, 0) = 0
-					 ORDER BY created_at ASC`
+					 ORDER BY comments.created_at DESC, comments.id DESC`
 				).bind(postId).all();
 				return siteHtmlResponse(renderPostPage({
 					user,
@@ -472,7 +472,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 					? 'comment_count DESC'
 					: sortBy === 'views'
 						? 'posts.view_count DESC'
-						: 'posts.created_at DESC';
+						: 'COALESCE(posts.published_at, posts.created_at) DESC';
 				const pinSortExpr = categoryId && categoryId !== 'uncategorized'
 					? 'posts.is_pinned DESC, COALESCE(posts.is_category_pinned, 0) DESC'
 					: 'posts.is_pinned DESC';
@@ -494,7 +494,7 @@ export async function renderSiteRoute(ctx: SiteRouteContext): Promise<Response |
 						 LEFT JOIN categories ON posts.category_id = categories.id
 						 ${localizedPostJoin(localizePosts)}
 						 ${where}
-						 ORDER BY ${pinSortExpr}, ${sortExpr}, posts.created_at DESC
+						 ORDER BY ${pinSortExpr}, ${sortExpr}, COALESCE(posts.published_at, posts.created_at) DESC, posts.created_at DESC
 						 LIMIT ? OFFSET ?`
 					).bind(...localizedPostParams(localizePosts), ...params, pageSize, offset).all(),
 					db.prepare(`SELECT COUNT(*) as total FROM posts LEFT JOIN categories ON posts.category_id = categories.id ${localizedPostJoin(localizePosts)} ${where}`).bind(...localizedPostParams(localizePosts), ...countParams).first<{ total: number }>(),

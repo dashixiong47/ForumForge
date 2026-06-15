@@ -35,7 +35,7 @@ export function renderMyContentPage(options: {
 	const progress = Math.max(4, Math.min(100, Math.round((xp / nextXp) * 100)));
 	const posts = options.posts.map((post) => `<article class="compact-item">
 		<div class="compact-item-head"><a class="compact-item-title" href="${publicPostPath(post.id, options.env)}">${escapeHtml(post.title)}</a>${postManageActions(options.user, post, '/me', options.env)}</div>
-		<div class="meta">${statusBadge(post.status)}<span>${post.category_name ? escapeHtml(post.category_name) : i18nText('post.uncategorized', '未分类')}</span><span>·</span><span>${escapeHtml(dateText(post.created_at))}</span><span>·</span>${statNode('comment', Number(post.comment_count || 0))}<span>·</span>${statNode('view', Number(post.view_count || 0))}</div>
+		<div class="meta">${statusBadge(post.status)}<span>${post.category_name ? escapeHtml(post.category_name) : i18nText('post.uncategorized', '未分类')}</span><span>·</span><span>${escapeHtml(dateText(post.published_at || post.created_at))}</span><span>·</span>${statNode('comment', Number(post.comment_count || 0))}<span>·</span>${statNode('view', Number(post.view_count || 0))}</div>
 		<p class="post-excerpt no-margin">${escapeHtml(stripMarkdown(post.content).slice(0, 160))}</p>
 		${String(post.status || '') === 'rejected' ? `<div class="status-note rejected"><strong data-i18n="me.rejectReason">拒绝理由</strong><span>${rejectReasonNote(post.rejection_reason)}</span><a class="btn" href="${publicPostPath(post.id, options.env)}/edit" data-i18n="me.editAndResubmit">修改后重新提交</a></div>` : ''}
 	</article>`).join('') || '<div class="panel-body muted" data-i18n="me.emptyPosts">你还没有发布帖子。</div>';
@@ -159,5 +159,4 @@ export function renderMyContentPage(options: {
 		</div>`,
 	});
 }
-
 

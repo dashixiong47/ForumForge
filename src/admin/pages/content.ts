@@ -43,7 +43,7 @@ export function renderAdminPosts(user: UserPayload, data: { posts: any[]; catego
 			<td>${adminSelect(categoryOptions.replace(`value="${escapeHtml(categoryId)}"`, `value="${escapeHtml(categoryId)}" selected`), { 'data-post-category': id })}</td>
 			<td>${Number(row.comment_count || 0)} / ${Number(row.view_count || 0)}</td>
 			<td>${statusBadge}</td>
-			<td>${escapeHtml(row.created_at || '')}</td>
+			<td>${escapeHtml(row.published_at || row.created_at || '')}</td>
 			<td><div class="admin-row-actions">
 				<a class="btn btn-sm" href="${escapeHtml(publicPostPath(row.id, env))}" data-i18n="admin.common.view">查看</a>
 				<a class="btn btn-sm" href="${escapeHtml(publicPostPath(row.id, env))}/edit" data-i18n="admin.common.edit">编辑</a>
@@ -248,5 +248,4 @@ document.addEventListener('click',async function(e){
 });`
 	});
 }
-
 

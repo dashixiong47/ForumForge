@@ -23,6 +23,7 @@ export interface SitePost {
 	title: string;
 	content: string;
 	created_at?: string;
+	published_at?: string | null;
 	is_pinned?: number;
 	is_category_pinned?: number;
 	min_view_level?: number;

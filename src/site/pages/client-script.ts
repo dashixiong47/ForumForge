@@ -77,7 +77,8 @@ ForumForge.loadEnabledPlugins=ForumForge.loadEnabledPlugins||async function(){
 };
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){watchPluginSettingSlots();hydrateUserBadges(document);ForumForge.loadEnabledPlugins().then(function(){syncPluginSettingSlots();hydrateUserBadges(document);});});else setTimeout(function(){watchPluginSettingSlots();hydrateUserBadges(document);ForumForge.loadEnabledPlugins().then(function(){syncPluginSettingSlots();hydrateUserBadges(document);});},0);
 function nonceHeaders(json){const h={'X-Timestamp':String(Math.floor(Date.now()/1000)),'X-Nonce':crypto.randomUUID()};if(json)h['Content-Type']='application/json';return h;}
-async function api(url, options){const res=await fetch(url,options);const data=await res.json().catch(()=>({}));if(!res.ok){const err=new Error(data.error||siteT('common.requestFailed','请求失败'));err.data=data;throw err;}return data;}
+function authHeaders(headers){const h=new Headers(headers||{});try{const token=localStorage.getItem('token');if(token&&!h.has('Authorization'))h.set('Authorization','Bearer '+token);}catch(e){}return h;}
+async function api(url, options){const opts=Object.assign({},options||{});opts.headers=authHeaders(opts.headers);const res=await fetch(url,opts);const data=await res.json().catch(()=>({}));if(!res.ok){if(res.status===401){try{localStorage.removeItem('token');}catch(e){}}const err=new Error(data.error||siteT('common.requestFailed','请求失败'));err.data=data;throw err;}return data;}
 async function applyPostSubmitPlugins(payload,form){
  if(window.ForumForge&&ForumForge.loadEnabledPlugins)await ForumForge.loadEnabledPlugins();
  const hooks=(window.ForumForge&&ForumForge.postSubmitHooks)||[];
@@ -475,6 +476,8 @@ document.addEventListener('submit',async(e)=>{
   if(action==='post'){
    const tagIds=[...form.querySelectorAll('input[name="tag_ids"]:checked')].map(i=>Number(i.value));
    const saveDraft=submit?.dataset?.draft==='1';
+   if(form.category_id)form.category_id.required=!saveDraft;
+   if(!saveDraft&&form.category_id&&!form.category_id.value){showMessage(siteT('compose.categoryRequired','请选择分类'),'error');form.category_id.focus();return;}
    const needsTurnstile=!saveDraft&&(!form.post_id?.value||String(form.dataset.postStatus||'')==='draft');
    const turnstilePayload=needsTurnstile?await ensureTurnstile(form):{};
    const i18nPayload=syncCurrentPostTranslation(form);
@@ -679,4 +682,3 @@ document.addEventListener('click',(e)=>{
 });
 `;
 }
-
